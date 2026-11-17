@@ -50,6 +50,11 @@ const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
 // thermometer and the band name. Both bars take the band colour (bd_oil_band).
 // Palettes index kColorNames.
 const double kOilMinimumC = (100.0 - 32) / 1.8, kOilMaximumC = (300.0 - 32) / 1.8;
+// N55 bar ranges where the reference ranges leave the bar mostly empty: boost to 25 psi
+// (bm3 maps peak about 20-22 psi), rail to 200 bar (system maximum), gauge oil pressure to 6 bar.
+const struct { unsigned slot; double minimum, maximum; } kN55Ranges[] = {
+    {BD_BOOST, 0, 25}, {BD_RAIL, 0, 200}, {BD_OIL, 0, 6},
+};
 const unsigned kOilPalette[] = {1u /* Blue */, 0u /* BMW Orange */, 2u /* Green */, 7u /* Red */};
 #ifdef PERF_LAB
 const char* const kOilBandNames[] = {"Cold", "Warm", "Ready", "Hot"};
@@ -288,6 +293,9 @@ void BoostDeck::refresh() {
         char label[128];
         DialScale scale = kDialScales[i];
         const bool oil = n55_ && i==BD_TRANS;
+        for (unsigned r=0;n55_ && r<sizeof kN55Ranges/sizeof kN55Ranges[0];++r) {
+            if (kN55Ranges[r].slot==i) { scale.minimum=kN55Ranges[r].minimum; scale.maximum=kN55Ranges[r].maximum; }
+        }
         if (oil) { scale.minimum=kOilMinimumC; scale.maximum=kOilMaximumC; scale.name="Oil temp"; }
         unsigned image = kBarFirst;
         if (received_ && bd_is_fresh(&frame_,i,elapsed)) {

@@ -37,3 +37,5 @@ BoostDeck captions the N55 transmission slot **OIL TEMP** and turns the tall Act
 ## Engine Fault Codes on the F87 M2 N55
 
 `EngineCodes/profile.txt` holding `n55` selects `native/src/dme_descriptions_n55.h`: all 1,378 fault-memory codes of SGBD `mevd172y` (MEVD17.2 / 17.2.6 / 17.2.G, SGBD index `0xF1910`) from bmw-unified-db 11.004, translated from BMW's German location texts. `native/tools/make_dme_descriptions.py` extracts the German text to a private CSV and writes the table from the translated CSV, so the BMW-derived German text is not committed. The 254 codes that the reference 340i table shares with this DME have identical German texts in both SGBDs.
+
+The N55 profile also narrows three bar ranges, which otherwise stay mostly empty on this engine: boost 0–25 psi (bm3 maps peak around 20–22 psi), rail pressure 0–200 bar (the N55 system maximum; about 50 bar at idle), and gauge oil pressure 0–6 bar. These are typical N55 figures; compare them with a log from the car.

@@ -146,7 +146,13 @@ bool BoostDeck::onInit() {
     n55_=n55Profile();
     oil_band_=-1;
 #ifdef PERF_LAB
-    if (n55_) updateModel(69u,bmw::ImageID(kN55Background));
+    if (n55_) {
+        // No Active Ethanol on the N55 profile: its read is the MHD+ MG1 monitor layout.
+        updateModel(69u,bmw::ImageID(kN55Background));
+        bmw::Parcel hidden(false);
+        setProperty(208u,3u,hidden);
+        updateModel(58u,bmw::BasicString<char>(""));
+    }
 #endif
     struct sockaddr_in a;
     fd_=socket(AF_INET,SOCK_DGRAM,0);
@@ -336,6 +342,7 @@ void BoostDeck::refresh() {
         }
     }
 #ifdef PERF_LAB
+    if (n55_) return;
     const bool valid = received_ && bd_is_fresh(&frame_,BD_ETHANOL,elapsed) &&
         frame_.value[BD_ETHANOL]>=0 && frame_.value[BD_ETHANOL]<=100;
     char ethanol[128];

@@ -3,7 +3,7 @@
 The N55 profile shows engine oil temperature and its warm-up band in the Transmission slot,
 captioned ENGINE. The caption is built from glyphs already in the reference background
 (56300): E from PRESSURE, and N, G and I from TIMING, so the font matches exactly. 56300 is
-left unchanged.
+left unchanged. The N55 profile has no Active Ethanol, so its tile (x >= 1015) is removed.
 
 Usage: python3 make_n55_background.py BoostDeck_ALL_Images.zip
 """
@@ -21,6 +21,7 @@ E, N, G, I = (943, 954), (322, 335), (339, 352), (289, 291)
 ENGINE = (E, N, G, I, N, E)
 # Spacing after each glyph, taken from the reference: N->G is 3 px in TIMING, the rest 4 px.
 SPACING = (4, 3, 4, 4, 4, 0)
+ETHANOL_TILE_X = 1015   # the Active Ethanol tile and the gap before it
 
 
 def n55_background(reference):
@@ -29,6 +30,9 @@ def n55_background(reference):
     for x in range(*TRANSMISSION_CAPTION):
         for y in range(y0, y1):
             image.putpixel((x, y), TILE)
+    for x in range(ETHANOL_TILE_X, image.width):
+        for y in range(image.height):
+            image.putpixel((x, y), (0, 0, 0, 0))
     x = 532
     for (a, b), space in zip(ENGINE, SPACING):
         glyph = reference.crop((a, y0, b + 1, y1))

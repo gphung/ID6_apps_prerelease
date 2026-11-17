@@ -45,6 +45,15 @@ bool n55Profile() {
     return n55;
 }
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
+// N55: the transmission slot shows engine oil temperature as "Engine", on a 100-300 F bar
+// coloured by warm-up band (bd_oil_band), with the band named after the value.
+// Palettes index kColorNames.
+const double kOilMinimumC = (100.0 - 32) / 1.8, kOilMaximumC = (300.0 - 32) / 1.8;
+const unsigned kOilPalette[] = {1u /* Blue */, 0u /* BMW Orange */, 2u /* Green */, 7u /* Red */};
+const char* const kOilBandNames[] = {"Cold", "Warming", "Ready", "Hot"};
+#ifdef PERF_LAB
+const unsigned kN55Background = 56301u; // tools/make_n55_background.py: ENGINE caption
+#endif
 #ifdef PERF_LAB
 typedef char dial_count_check[kBarCount + 1 == BD_COUNT ? 1 : -1];
 const unsigned kEthanolFirst = 56100u;
@@ -61,6 +70,8 @@ class BoostDeck : public bmw::PluginApp {
     uint64_t received_;
     pid_t collector_;
     bool stopping_;
+    bool n55_;
+    int oil_band_;
     bool gauges_visible_;
     unsigned color_;
 #ifdef PERF_LAB
@@ -76,7 +87,7 @@ public:
     BoostDeck(bmw::IDispatcher& d, bmw::BasicString<char> name, unsigned maj, unsigned mn,
               bmw::RHMIInterfaceVersion rhmi, const bmw::Bundle& cfg, const bmw::Bundle& res)
         : bmw::PluginApp(d,name,maj,mn,rhmi,cfg,res), fd_(-1), poll_generation_(0),
-          received_(0), collector_(-1), stopping_(false), gauges_visible_(false),
+          received_(0), collector_(-1), stopping_(false), n55_(false), oil_band_(-1), gauges_visible_(false),
           color_(0),
 #ifdef PERF_LAB
           metric_(false),
@@ -132,6 +143,11 @@ public:
 bool BoostDeck::onInit() {
     shutdown();
     resetDisplay();
+    n55_=n55Profile();
+    oil_band_=-1;
+#ifdef PERF_LAB
+    if (n55_) updateModel(69u,bmw::ImageID(kN55Background));
+#endif
     struct sockaddr_in a;
     fd_=socket(AF_INET,SOCK_DGRAM,0);
     memset(&a,0,sizeof a); a.sin_family=AF_INET; a.sin_port=htons(BD_UDP_PORT);
@@ -203,7 +219,7 @@ void BoostDeck::startVisibleCollector() {
         bd_mono_ms()<retry_at_) return;
     const DiagnosticGateway gateway("/var/opt/hmi/data/ID5/Plugins/" "BoostDeck" "/gateway-ip.txt");
     // The ethanol query is an MHD+ MG1 layout, so the N55 profile does not send it.
-    const bool n55=n55Profile();
+    const bool n55=n55_;
     const char *args[8];
     unsigned k=0;
     args[k++]=kCollector; args[k++]="--host"; args[k++]=gateway.host(); args[k++]="--session";
@@ -266,10 +282,13 @@ void BoostDeck::refresh() {
     uint64_t elapsed=received_ ? bd_mono_ms()-received_ : static_cast<uint64_t>(BD_STALE_MS);
     for (unsigned i=0;i<kBarCount;++i) {
         char label[128];
-        const DialScale& scale = kDialScales[i];
+        DialScale scale = kDialScales[i];
+        const bool oil = n55_ && i==BD_TRANS;
+        if (oil) { scale.minimum=kOilMinimumC; scale.maximum=kOilMaximumC; scale.name="Engine"; }
         unsigned image = kBarFirst;
         if (received_ && bd_is_fresh(&frame_,i,elapsed)) {
             double x=frame_.value[i];
+            if (oil) oil_band_=bd_oil_band(x,oil_band_);
             const char *unit_space = *scale.unit ? " " : "";
             double reading = bd_display_value(i,x,0);
             if (i==BD_BOOST && fabs(reading)<0.05) reading=0;
@@ -290,11 +309,17 @@ void BoostDeck::refresh() {
             if (fraction<0) fraction=0;
             if (fraction>1) fraction=1;
             unsigned step=static_cast<unsigned>(fraction*kDialSteps+.5);
+            if (oil && oil_band_>=0) {
+                const size_t used=strlen(label);
+                snprintf(label+used,sizeof label-used,"  %s",kOilBandNames[oil_band_]);
+            }
             if (step) {
-                const unsigned palette = color_ == kMulticolor ? kMulticolor + i : color_;
+                const unsigned palette = oil && oil_band_>=0 ? kOilPalette[oil_band_]
+                                       : color_ == kMulticolor ? kMulticolor + i : color_;
                 image += palette*kDialSteps+step;
             }
         } else {
+            if (oil) oil_band_=-1;
 #ifdef PERF_LAB
             strcpy(label,"--");
 #else

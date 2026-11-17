@@ -24,8 +24,10 @@ The worker enforces data length, plausibility limits, and freshness. Look at the
 | Display | Change from reference | Capture |
 | --- | --- | --- |
 | Coolant temperature | OBD `01 05`, one byte − 40 °C, instead of DID `4300` | `4300` returned one byte (`4B`); `01 05` returned `30` (8 °C) with IAT at 9.75 °C |
-| Transmission temperature | Not requested (manual, no EGS) | `DA12` timed out |
+| Transmission slot | DME oil temperature `4408`, two bytes, raw ÷ 10 − 273.15 °C. The EGS is not requested (manual) | `DA12` timed out. `4408` still needs an idle comparison with an independent oil reading on this car |
 | Rail pressure | Not requested | `56D7` answered NRC `31` |
 | Active Ethanol | Not requested | The query is an MHD+ MG1 layout |
 | Oil pressure | Unchanged, pending idle check | `586F` = `0417` (1.047 bar) with the engine off, which suggests absolute pressure |
 | AFR | Unchanged, pending idle check | `5889` = `FFFF` with the engine off |
+
+BoostDeck labels the N55 transmission slot **Engine** (background `56301`, from `native/tools/make_n55_background.py`). The bar spans 100–300 °F and takes its colour from the oil warm-up band rather than the selected gauge colour: Cold (blue) below 180 °F, Warming (BMW Orange) from 180 °F, Ready (green) from 194 °F, and Hot (red) from 266 °F. Each band is held until the reading falls 1 °C below its threshold, and the band name follows the value.

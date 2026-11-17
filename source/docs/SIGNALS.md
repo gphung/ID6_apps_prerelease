@@ -16,3 +16,16 @@ These are the reference Gen 1 B58/340i candidates in the current source. They ar
 | ShiftDeck speed | DME `12` | OBD `01 0D` | One byte in km/h, displayed in mph. |
 
 The worker enforces data length, plausibility limits, and freshness. Look at the code for exact bounds and units. If the DME reports coolant via `01 05`, confirm that reading against the intended coolant channel before adding an explicit fallback. An OBD PID and a BMW DID are distinct requests with distinct reply formats. [Request table](../native/src/collector.c) · [Decoder](../native/src/gauge_core.c)
+
+## F87 M2 N55 profile
+
+`BoostDeck/profile.txt` containing `n55` starts the collector with `--profile n55`. Captured on a 2018 M2 (N55, manual, bootmod3) with ignition on and the engine off. Readings at idle still need comparison with an independent logger.
+
+| Display | Change from reference | Capture |
+| --- | --- | --- |
+| Coolant temperature | OBD `01 05`, one byte − 40 °C, instead of DID `4300` | `4300` returned one byte (`4B`); `01 05` returned `30` (8 °C) with IAT at 9.75 °C |
+| Transmission temperature | Not requested (manual, no EGS) | `DA12` timed out |
+| Rail pressure | Not requested | `56D7` answered NRC `31` |
+| Active Ethanol | Not requested | The query is an MHD+ MG1 layout |
+| Oil pressure | Unchanged, pending idle check | `586F` = `0417` (1.047 bar) with the engine off, which suggests absolute pressure |
+| AFR | Unchanged, pending idle check | `5889` = `FFFF` with the engine off |

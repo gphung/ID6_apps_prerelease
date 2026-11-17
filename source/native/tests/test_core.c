@@ -81,6 +81,22 @@ int main(void) {
           assert(!bd_decode_did(dids[i],payloads[i],width-1,&x) && x==123);
           assert(!bd_decode_did(dids[i],extra,width+1,&x) && x==123);
       } }
+    { /* F87 M2 N55, ignition on, engine off, 2026-11-16 (de-identified). */
+      const unsigned char obd_coolant[]={0x30}, did_coolant_one_byte[]={0x4b};
+      const unsigned char oil[]={0x04,0x17}, lambda_engine_off[]={0xff,0xff};
+      const unsigned char ambient[]={0x65,0x2e}, manifold[]={0x32,0x97};
+      double c=0;
+      assert(bd_decode_pid(0x05,obd_coolant,1,&c) && fabs(c-8)<.00001);
+      x=123; assert(!bd_decode_pid(0x05,obd_coolant,0,&x) && x==123);
+      assert(!bd_decode_pid(0x05,oil,2,&x) && x==123);
+      { const unsigned char hot[]={190}, too_hot[]={191};
+        assert(bd_decode_pid(0x05,hot,1,&c) && fabs(c-150)<.00001);
+        assert(!bd_decode_pid(0x05,too_hot,1,&x)); }
+      assert(!bd_decode_pid(0x0c,obd_coolant,1,&x));
+      assert(!bd_decode_did(0x4300,did_coolant_one_byte,1,&x) && x==123);
+      check(0x586f,oil,2,1.047);
+      assert(!bd_decode_did(0x5889,lambda_engine_off,2,&x));
+      check(0x4201,ambient,2,25902/256.0); check(0x4205,manifold,2,12951/128.0); }
     test_parser_boundaries();
     memset(&f,0,sizeof f); f.seq=123; f.valid=31; f.sent_ms=1234567890123ULL;
     f.value[0]=18.25; f.value[1]=14.7;

@@ -19,6 +19,11 @@ CAR_VALUES = {0x4201: bytes.fromhex("6589"), 0x4205: bytes.fromhex("32dd"),
               0x5889: bytes.fromhex("1015"), 0x4A49: bytes.fromhex("ffff"),
               0x580F: bytes.fromhex("8c"), 0xDA12: bytes.fromhex("005a")}
 CAR_VALUES.update({did: VALUES[did] for did in (0x56D7, 0x586F, 0x4300)})
+# F87 M2 N55, ignition on, engine off, 2026-11-16. OBD 01 05 is keyed by PID.
+N55_VALUES = {0x4201: bytes.fromhex("652e"), 0x4205: bytes.fromhex("3297"),
+              0x5889: bytes.fromhex("ffff"), 0x4A49: bytes.fromhex("0000"),
+              0x580F: bytes.fromhex("4d"), 0x586F: bytes.fromhex("0417"),
+              0x4300: bytes.fromhex("4b"), 0x05: bytes.fromhex("30")}
 
 
 def frame(ctrl, body):
@@ -60,9 +65,12 @@ class TransportTest(unittest.TestCase):
                         req = exact(conn, length)
                         requests.append(req)
                         self.assertEqual(req[0], 0xF4)
-                        self.assertEqual(length, 5)
-                        self.assertEqual(req[2], 0x22)  # read only
+                        obd = req[2] == 0x01
+                        self.assertEqual(length, 4 if obd else 5)
+                        self.assertIn(req[2], (0x01, 0x22))  # read only
                         ecu, did = req[1], int.from_bytes(req[3:], "big")
+                        if obd:
+                            self.assertEqual(mode, "n55")
                         self.assertEqual(ecu, 0x18 if did == 0xDA12 else 0x12)
                         if mode == "timeout":
                             time.sleep(.8)
@@ -80,9 +88,11 @@ class TransportTest(unittest.TestCase):
                             self.assertEqual(exact(conn, alive_length), bytes([0, 0xF4]))
                         conn.sendall(frame(2, req))  # ack
                         # Wrong source with a valid-looking payload must be ignored.
-                        conn.sendall(frame(1, bytes([0x99, 0xF4, 0x62]) + req[3:] + b"\0\0"))
-                        conn.sendall(frame(1, bytes([ecu, 0xF4, 0x7F, 0x22, 0x78])))
-                        if mode == "no_trans" and did == 0xDA12:
+                        conn.sendall(frame(1, bytes([0x99, 0xF4, req[2] + 0x40]) + req[3:] + b"\0\0"))
+                        conn.sendall(frame(1, bytes([ecu, 0xF4, 0x7F, req[2], 0x78])))
+                        if mode == "n55":
+                            result = bytes([ecu, 0xF4, req[2] + 0x40]) + req[3:] + N55_VALUES[did]
+                        elif mode == "no_trans" and did == 0xDA12:
                             result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
                         else:
                             values = CAR_VALUES if mode == "car_snapshot" else VALUES
@@ -342,6 +352,26 @@ class TransportTest(unittest.TestCase):
                     proc.kill()
                 _, err = proc.communicate()
         self.assertIn("FAKE-MOST exit unregister_target=1 unregister_client=1 free=1", err)
+
+    def test_n55_profile_skips_egs_and_rail_and_reads_obd_coolant(self):
+        p, requests, trace = self.run_collector("n55", ("--profile", "n55", "--trace"))
+        self.assertEqual(len(requests), 7)
+        self.assertTrue(all(r[1] == 0x12 for r in requests))
+        self.assertIn(bytes.fromhex("f4120105"), requests)
+        self.assertNotIn(bytes.fromhex("f412224300"), requests)
+        self.assertNotIn(bytes.fromhex("f41222 56d7".replace(" ", "")), requests)
+        # boost, timing, IAT, oil and coolant valid; AFR, trans and rail blank
+        self.assertEqual(int(p[3]), 0b11001101)
+        self.assertAlmostEqual(float(p[5]), 0, places=1)
+        self.assertAlmostEqual(float(p[11]), 9.75)
+        self.assertAlmostEqual(float(p[17]), 1.047)
+        self.assertAlmostEqual(float(p[19]), 8)
+        self.assertIn("pid=05 payload=30 decoded=8.000000", trace)
+        self.assertIn("F87 M2 N55 candidate profile", trace)
+
+    def test_unknown_profile_is_rejected(self):
+        r = subprocess.run([BIN, "--host", "127.0.0.1", "--profile", "b58"], capture_output=True)
+        self.assertEqual(r.returncode, 2)
 
     def test_demo_never_uses_vehicle(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:

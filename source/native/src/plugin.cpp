@@ -33,6 +33,17 @@ const unsigned kPollKey = 0x4244504cu; // BDPL, private to this app
 const unsigned kActivePollIntervalMs = 25u;
 const unsigned kIdlePollIntervalMs = 250u;
 const char kCollector[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/boostdeck-collector-qnx";
+const char kProfileFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/profile.txt";
+
+// profile.txt holding "n55" selects the F87 M2 N55 reads (SIGNALS.md). Anything else keeps the reference.
+bool n55Profile() {
+    FILE* file = fopen(kProfileFile, "r");
+    if (!file) return false;
+    char profile[8];
+    const bool n55 = fscanf(file, "%7s", profile) == 1 && !strcmp(profile, "n55");
+    fclose(file);
+    return n55;
+}
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
 #ifdef PERF_LAB
 typedef char dial_count_check[kBarCount + 1 == BD_COUNT ? 1 : -1];
@@ -191,11 +202,16 @@ void BoostDeck::startVisibleCollector() {
     if (!gauges_visible_ || collector_>0 || fd_<0 ||
         bd_mono_ms()<retry_at_) return;
     const DiagnosticGateway gateway("/var/opt/hmi/data/ID5/Plugins/" "BoostDeck" "/gateway-ip.txt");
-    const char *args[]={kCollector,"--host",gateway.host(),"--session",
+    // The ethanol query is an MHD+ MG1 layout, so the N55 profile does not send it.
+    const bool n55=n55Profile();
+    const char *args[8];
+    unsigned k=0;
+    args[k++]=kCollector; args[k++]="--host"; args[k++]=gateway.host(); args[k++]="--session";
+    if (n55) { args[k++]="--profile"; args[k++]="n55"; }
 #ifdef PERF_LAB
-                       "--ethanol",
+    else args[k++]="--ethanol";
 #endif
-                       0};
+    args[k]=0;
     collector_=launch(args,-1);
     retry_at_=bd_mono_ms()+2000;
 }

@@ -386,6 +386,29 @@ static int read_did(struct diag_link *link, unsigned ecu, unsigned did, double *
     return decode_reply(ecu,did,reply,n,value);
 }
 
+/* OBD mode 01 read for profiles where the BMW DID is not usable. Same return codes as read_did. */
+static int read_obd(struct diag_link *link, unsigned char pid, double *value) {
+    unsigned char request[]={0x01,pid}, prefix[]={0x41,pid};
+    unsigned char reply[64];
+    unsigned negative;
+    int n=diag_link_request(link,0x12,request,2,prefix,2,reply,sizeof reply,500,&negative), i, decoded;
+    if (n==-2) {
+        fprintf(stderr,"ECU 12 PID %02X NRC %02X\n",pid,negative);
+        return 0;
+    }
+    if (n==-3) return -3;
+    if (n<0) return -1;
+    decoded=bd_decode_pid(pid,reply+2,(size_t)n-2,value);
+    if (trace_reads) {
+        fprintf(stderr,"RAW mono_ms=%llu ecu=12 pid=%02X payload=",
+                (unsigned long long)bd_mono_ms(),pid);
+        for (i=2;i<n;++i) fprintf(stderr,"%02X",reply[i]);
+        if (decoded) fprintf(stderr," decoded=%.6f\n",*value);
+        else fprintf(stderr," unavailable reason=invalid-or-out-of-range\n");
+    }
+    return decoded;
+}
+
 static int send_frame(int sock, struct sockaddr_in *dest, bd_frame *f, uint64_t *observed) {
     char packet[BD_MAX_PACKET];
     uint64_t now = bd_mono_ms();
@@ -403,7 +426,7 @@ static int send_frame(int sock, struct sockaddr_in *dest, bd_frame *f, uint64_t 
 int main(int argc, char **argv) {
     const char *host = 0;
     unsigned port = 6801, udp_port = BD_UDP_PORT, cycles = 0, count = 0, i;
-    int demo = 0, sock, no_trans = 0, session = 0, scanned = 0, transport = DIAG_AUTO, most_lost = 0;
+    int demo = 0, sock, no_trans = 0, n55 = 0, session = 0, scanned = 0, transport = DIAG_AUTO, most_lost = 0;
     struct diag_link link;
     struct diag_link_cfg cfg;
     pid_t parent = getppid();
@@ -439,6 +462,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--session")) session = 1;
         else if (!strcmp(argv[i], "--trace")) trace_reads = 1;
         else if (!strcmp(argv[i], "--no-trans")) no_trans = 1;
+        /* F87 M2 N55, manual: no EGS, rail DID 56D7 answers NRC 31, and DID 4300
+         * returns one byte. Coolant uses OBD 01 05 instead. Captured 2026-11-16. */
+        else if (!strcmp(argv[i], "--profile") && i+1 < (unsigned)argc &&
+                 (!strcmp(argv[i+1], "n55") || !strcmp(argv[i+1], "reference"))) {
+            n55 = !strcmp(argv[++i], "n55");
+            if (n55) no_trans = 1;
+        }
         else if (!strcmp(argv[i], "--host") && i+1 < (unsigned)argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < (unsigned)argc) port = number(argv[++i],1,65535);
         else if (!strcmp(argv[i], "--udp-port") && i+1 < (unsigned)argc) udp_port = number(argv[++i],1,65535);
@@ -446,7 +476,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "auto")) ++i;
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "hsfz")) { transport = DIAG_HSFZ; ++i; }
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "most")) { transport = DIAG_MOST; ++i; }
-        else { fprintf(stderr, "Usage: %s (--host IPv4 | --demo) [--transport auto|hsfz|most] [--port 6801] [--udp-port 42860] [--cycles N] [--no-trans] [--trace] [--session]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "Usage: %s (--host IPv4 | --demo) [--transport auto|hsfz|most] [--port 6801] [--udp-port 42860] [--cycles N] [--no-trans] [--profile reference|n55] [--trace] [--session]\n", argv[0]); return 2; }
     }
     if (host && demo) { fprintf(stderr, "Choose --host or --demo, never both.\n"); return 2; }
     if (!host && !demo && transport == DIAG_HSFZ) { fprintf(stderr, "--transport hsfz needs --host.\n"); return 2; }
@@ -463,8 +493,9 @@ int main(int argc, char **argv) {
     memset(&dest,0,sizeof dest); dest.sin_family=AF_INET; dest.sin_port=htons((uint16_t)udp_port);
     inet_pton(AF_INET,"127.0.0.1",&dest.sin_addr); /* local process IPC only */
     memset(&f,0,sizeof f); f.demo=(unsigned)demo;
-    fprintf(stderr, "%s: 2016 340i candidate profile; validate against ISTA/logger.\n",
-        demo ? "DEMO / NO VEHICLE CONNECTION" : host ? "READ ONLY / HSFZ" : "READ ONLY / MOST");
+    fprintf(stderr, "%s: %s candidate profile; validate against ISTA/logger.\n",
+        demo ? "DEMO / NO VEHICLE CONNECTION" : host ? "READ ONLY / HSFZ" : "READ ONLY / MOST",
+        n55 ? "F87 M2 N55" : "2016 340i");
     while (diag_running && (!cycles || count < cycles) && (!session || getppid() == parent)) {
         uint64_t start = bd_mono_ms();
         f.seq++;
@@ -491,6 +522,7 @@ int main(int argc, char **argv) {
                 unsigned kept;
                 int on_most = diag_link_on_most(&link);
                 if ((no_trans || on_most) && dids[i] == 0xda12) continue;
+                if (n55 && dids[i] == 0x56d7) continue;
                 if ((session || on_most) && start < failed_until[i]) continue;
                 if (!full_scan && periods[i] && start < due[i]) continue;
                 if (full_scan) due[i]=start+first_delay[i];
@@ -500,7 +532,8 @@ int main(int argc, char **argv) {
                 }
                 kept = i != 0 ? f.valid & (1u << (i-1)) : 0;
                 f.valid &= ~kept;
-                rc = read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);
+                rc = n55 && dids[i] == 0x4300 ? read_obd(&link, 0x05, &v)
+                   : read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);
                 if (rc == -3) { /* skip it for a while; a value still fresh stays shown */
                     failed_until[i] = bd_mono_ms()+2000;
                     if (kept) {

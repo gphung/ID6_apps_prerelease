@@ -21,6 +21,7 @@ typedef struct {
 } bd_frame;
 uint64_t bd_mono_ms(void);
 int bd_decode_did(unsigned did, const unsigned char *data, size_t len, double *out);
+int bd_decode_pid(unsigned pid, const unsigned char *data, size_t len, double *out);
 int bd_encode(const bd_frame *f, char *out, size_t len);
 int bd_parse(const char *data, size_t len, bd_frame *out);
 int bd_is_fresh(const bd_frame *f, unsigned i, uint64_t elapsed_ms);

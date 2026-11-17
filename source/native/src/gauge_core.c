@@ -44,6 +44,22 @@ int bd_decode_did(unsigned did, const unsigned char *p, size_t n, double *out) {
     return 1;
 }
 
+/* OBD mode 01 payload bytes only, after the 41 PID prefix. */
+int bd_decode_pid(unsigned pid, const unsigned char *p, size_t n, double *out) {
+    double x;
+    if (!p || !out) return 0;
+    switch (pid) {
+    case 0x05: /* SAE J1979 engine coolant: A - 40 C */
+        if (n != 1) return 0;
+        x = (double)p[0] - 40;
+        if (x < -40 || x > 150) return 0;
+        break;
+    default: return 0;
+    }
+    *out = x;
+    return 1;
+}
+
 int bd_encode(const bd_frame *f, char *out, size_t len) {
     int n;
     size_t used;

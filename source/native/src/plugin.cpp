@@ -45,14 +45,17 @@ bool n55Profile() {
     return n55;
 }
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
-// N55: the transmission slot shows engine oil temperature as "Engine", on a 100-300 F bar
-// coloured by warm-up band (bd_oil_band), with the band named after the value.
+// N55: the transmission slot shows engine oil temperature as "Oil temp" on a 100-300 F bar, and
+// the tall Active Ethanol tile becomes the ENGINE warm-up panel: the same temperature as a
+// thermometer and the band name. Both bars take the band colour (bd_oil_band).
 // Palettes index kColorNames.
 const double kOilMinimumC = (100.0 - 32) / 1.8, kOilMaximumC = (300.0 - 32) / 1.8;
 const unsigned kOilPalette[] = {1u /* Blue */, 0u /* BMW Orange */, 2u /* Green */, 7u /* Red */};
-const char* const kOilBandNames[] = {"Cold", "Warming", "Ready", "Hot"};
 #ifdef PERF_LAB
-const unsigned kN55Background = 56301u; // tools/make_n55_background.py: ENGINE caption
+const char* const kOilBandNames[] = {"Cold", "Warm", "Ready", "Hot"};
+#endif
+#ifdef PERF_LAB
+const unsigned kN55Background = 56301u; // tools/make_n55_background.py: OIL TEMP and ENGINE
 #endif
 #ifdef PERF_LAB
 typedef char dial_count_check[kBarCount + 1 == BD_COUNT ? 1 : -1];
@@ -146,13 +149,8 @@ bool BoostDeck::onInit() {
     n55_=n55Profile();
     oil_band_=-1;
 #ifdef PERF_LAB
-    if (n55_) {
-        // No Active Ethanol on the N55 profile: its read is the MHD+ MG1 monitor layout.
-        updateModel(69u,bmw::ImageID(kN55Background));
-        bmw::Parcel hidden(false);
-        setProperty(208u,3u,hidden);
-        updateModel(58u,bmw::BasicString<char>(""));
-    }
+    // The N55 profile has no Active Ethanol (an MHD+ MG1 read); its tile is the ENGINE panel.
+    if (n55_) updateModel(69u,bmw::ImageID(kN55Background));
 #endif
     struct sockaddr_in a;
     fd_=socket(AF_INET,SOCK_DGRAM,0);
@@ -290,7 +288,7 @@ void BoostDeck::refresh() {
         char label[128];
         DialScale scale = kDialScales[i];
         const bool oil = n55_ && i==BD_TRANS;
-        if (oil) { scale.minimum=kOilMinimumC; scale.maximum=kOilMaximumC; scale.name="Engine"; }
+        if (oil) { scale.minimum=kOilMinimumC; scale.maximum=kOilMaximumC; scale.name="Oil temp"; }
         unsigned image = kBarFirst;
         if (received_ && bd_is_fresh(&frame_,i,elapsed)) {
             double x=frame_.value[i];
@@ -315,10 +313,6 @@ void BoostDeck::refresh() {
             if (fraction<0) fraction=0;
             if (fraction>1) fraction=1;
             unsigned step=static_cast<unsigned>(fraction*kDialSteps+.5);
-            if (oil && oil_band_>=0) {
-                const size_t used=strlen(label);
-                snprintf(label+used,sizeof label-used,"  %s",kOilBandNames[oil_band_]);
-            }
             if (step) {
                 const unsigned palette = oil && oil_band_>=0 ? kOilPalette[oil_band_]
                                        : color_ == kMulticolor ? kMulticolor + i : color_;
@@ -342,14 +336,27 @@ void BoostDeck::refresh() {
         }
     }
 #ifdef PERF_LAB
-    if (n55_) return;
-    const bool valid = received_ && bd_is_fresh(&frame_,BD_ETHANOL,elapsed) &&
-        frame_.value[BD_ETHANOL]>=0 && frame_.value[BD_ETHANOL]<=100;
     char ethanol[128];
-    if (valid) snprintf(ethanol,sizeof ethanol,"%.0f%%",frame_.value[BD_ETHANOL]);
-    else strcpy(ethanol,"--");
-    const unsigned step=valid ? static_cast<unsigned>(frame_.value[BD_ETHANOL]*kEthanolSteps/100.+.5) : 0;
-    const unsigned ethanolImage=kEthanolFirst+(step ? color_*kEthanolSteps+step : 0);
+    unsigned ethanolImage=kEthanolFirst;
+    if (n55_) {
+        // ENGINE panel: oil thermometer in the band colour, and the band name.
+        const bool valid = received_ && bd_is_fresh(&frame_,BD_TRANS,elapsed) && oil_band_>=0;
+        if (valid) {
+            double fraction=(frame_.value[BD_TRANS]-kOilMinimumC)/(kOilMaximumC-kOilMinimumC);
+            if (fraction<0) fraction=0;
+            if (fraction>1) fraction=1;
+            const unsigned step=static_cast<unsigned>(fraction*kEthanolSteps+.5);
+            if (step) ethanolImage+=kOilPalette[oil_band_]*kEthanolSteps+step;
+            strcpy(ethanol,kOilBandNames[oil_band_]);
+        } else strcpy(ethanol,"--");
+    } else {
+        const bool valid = received_ && bd_is_fresh(&frame_,BD_ETHANOL,elapsed) &&
+            frame_.value[BD_ETHANOL]>=0 && frame_.value[BD_ETHANOL]<=100;
+        if (valid) snprintf(ethanol,sizeof ethanol,"%.0f%%",frame_.value[BD_ETHANOL]);
+        else strcpy(ethanol,"--");
+        const unsigned step=valid ? static_cast<unsigned>(frame_.value[BD_ETHANOL]*kEthanolSteps/100.+.5) : 0;
+        ethanolImage=kEthanolFirst+(step ? color_*kEthanolSteps+step : 0);
+    }
     if (images_[BD_ETHANOL]!=ethanolImage) {
         updateModel(68u,bmw::ImageID(ethanolImage));
         images_[BD_ETHANOL]=ethanolImage;

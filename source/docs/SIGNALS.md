@@ -26,13 +26,13 @@ The worker enforces data length, plausibility limits, and freshness. Look at the
 | Coolant temperature | OBD `01 05`, one byte − 40 °C, instead of DID `4300` | `4300` returned one byte (`4B`); `01 05` returned `30` (8 °C) with IAT at 9.75 °C |
 | Transmission slot | DME oil temperature `4408`, two signed bytes × 0.1 °C (`mevd172y` SG_FUNKTIONEN). The EGS is not requested (manual) | `DA12` timed out. `4408` still needs an idle comparison with an independent oil reading on this car |
 | Rail pressure | DME `58EF`, filtered actual rail pressure, two bytes × 0.0005 MPa (0.005 bar) | `56D7` answered NRC `31`. `58EF` is from the SGBD and still needs a reading on this car |
-| Active Ethanol | Not requested, and the tile is removed from the N55 background | The query is an MHD+ MG1 layout |
+| Active Ethanol | Not requested; the tile becomes the ENGINE warm-up panel | The query is an MHD+ MG1 layout |
 | Oil pressure | `586F` is absolute hPa in the SGBD; the gauge subtracts ambient (`4201`) | `586F` = `0417` (1047 hPa) with the engine off, about ambient |
 | AFR | Unchanged, pending idle check | `5889` = `FFFF` with the engine off |
 
 Coolant `4300` is one byte × 0.75 − 48 °C on this DME (`4B` = 8.25 °C, against `01 05` = 8 °C); the profile keeps `01 05`.
 
-BoostDeck labels the N55 transmission slot **Engine** (background `56301`, from `native/tools/make_n55_background.py`). The bar spans 100–300 °F and takes its colour from the oil warm-up band rather than the selected gauge colour: Cold (blue) below 180 °F, Warming (BMW Orange) from 180 °F, Ready (green) from 194 °F, and Hot (red) from 266 °F. Each band is held until the reading falls 1 °C below its threshold, and the band name follows the value.
+BoostDeck captions the N55 transmission slot **OIL TEMP** and turns the tall Active Ethanol tile into an **ENGINE** warm-up panel (background `56301`, from `native/tools/make_n55_background.py`). Both bars span 100–300 °F and take the band colour rather than the selected gauge colour: Cold (blue) below 180 °F, Warm (BMW Orange) from 180 °F, Ready (green) from 194 °F, and Hot (red) from 266 °F. Each band is held until the reading falls 1 °C below its threshold. The ENGINE panel shows the band name under the thermometer, and a strip beside it marks the bands.
 
 ## Engine Fault Codes on the F87 M2 N55
 

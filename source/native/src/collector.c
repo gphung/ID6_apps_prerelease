@@ -526,11 +526,13 @@ int main(int argc, char **argv) {
                 int on_most = diag_link_on_most(&link);
                 if (!n55 && (no_trans || on_most) && dids[i] == 0xda12) continue;
                 if ((session || on_most) && start < failed_until[i]) continue;
-                if (!full_scan && periods[i] && start < due[i]) continue;
+                /* N55: rail pressure every 500 ms; boost, AFR, timing and oil pressure stay every scan. */
+                const unsigned period = n55 && dids[i] == 0x56d7 ? 500 : periods[i];
+                if (!full_scan && period && start < due[i]) continue;
                 if (full_scan) due[i]=start+first_delay[i];
-                else if (periods[i]) {
-                    due[i]+=periods[i];
-                    if (due[i]<=start) due[i]=start+periods[i];
+                else if (period) {
+                    due[i]+=period;
+                    if (due[i]<=start) due[i]=start+period;
                 }
                 kept = i != 0 ? f.valid & (1u << (i-1)) : 0;
                 f.valid &= ~kept;

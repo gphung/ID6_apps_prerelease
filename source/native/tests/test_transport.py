@@ -377,6 +377,15 @@ class TransportTest(unittest.TestCase):
         self.assertIn("pid=05 payload=30 decoded=8.000000", trace)
         self.assertIn("F87 M2 N55 candidate profile", trace)
 
+    def test_n55_rail_every_500_ms_and_oil_pressure_every_scan(self):
+        _, _, trace = self.run_collector("n55", ("--profile", "n55", "--trace"), cycles=40)
+        times = lambda did: [int(t) for t in re.findall(rf"RAW mono_ms=(\d+) ecu=12 did={did}", trace)]
+        rail, oil = times("58EF"), times("586F")
+        self.assertEqual(len(oil), 40)                    # every scan
+        self.assertLess(len(rail), len(oil) / 2)
+        gaps = [b - a for a, b in zip(rail[1:], rail[2:])]  # the first two are the initial scan
+        self.assertTrue(gaps and all(450 < g < 700 for g in gaps), gaps)
+
     def test_unknown_profile_is_rejected(self):
         r = subprocess.run([BIN, "--host", "127.0.0.1", "--profile", "b58"], capture_output=True)
         self.assertEqual(r.returncode, 2)

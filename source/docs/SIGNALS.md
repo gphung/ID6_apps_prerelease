@@ -31,3 +31,7 @@ The worker enforces data length, plausibility limits, and freshness. Look at the
 | AFR | Unchanged, pending idle check | `5889` = `FFFF` with the engine off |
 
 BoostDeck labels the N55 transmission slot **Engine** (background `56301`, from `native/tools/make_n55_background.py`). The bar spans 100–300 °F and takes its colour from the oil warm-up band rather than the selected gauge colour: Cold (blue) below 180 °F, Warming (BMW Orange) from 180 °F, Ready (green) from 194 °F, and Hot (red) from 266 °F. Each band is held until the reading falls 1 °C below its threshold, and the band name follows the value.
+
+## Engine Fault Codes on the F87 M2 N55
+
+`EngineCodes/profile.txt` holding `n55` selects `native/src/dme_descriptions_n55.h`: all 1,378 fault-memory codes of SGBD `mevd172y` (MEVD17.2 / 17.2.6 / 17.2.G, SGBD index `0xF1910`) from bmw-unified-db 11.004, translated from BMW's German location texts. `native/tools/make_dme_descriptions.py` extracts the German text to a private CSV and writes the table from the translated CSV, so the BMW-derived German text is not committed. The 254 codes that the reference 340i table shares with this DME have identical German texts in both SGBDs.

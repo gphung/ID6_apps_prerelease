@@ -46,10 +46,14 @@ build/test-most: tests/test_most.c $(MOST) $(FAKE_DSI) $(MOST_HEADERS) | build
 build/test-diag-link: tests/test_diag_link.c $(CORE_LINK) $(MOST) tests/fake_most_env.c $(FAKE_DSI) $(HEADERS) $(MOST_HEADERS) | build
 	$(HOST_LINK) $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup
 	./build/test-core
+	./build/test-dme-lookup
 	./build/test-most
 	./build/test-diag-link
 	$(PYTHON) -B tests/test_drive_apps.py
 	$(PYTHON) -B tests/test_oneshot_most.py
 	$(PYTHON) -B tests/test_transport.py
+
+build/test-dme-lookup: tests/test_dme_lookup.c src/dme_lookup.h src/dme_descriptions.h src/dme_descriptions_n55.h | build
+	$(CC) $(CFLAGS) -Isrc tests/test_dme_lookup.c -o $@

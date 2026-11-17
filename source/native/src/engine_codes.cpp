@@ -1,7 +1,7 @@
 #include "plugin_factory.h"
 #include "diagnostic_worker.h"
 #include "diagnostic_gateway.h"
-#include "dme_descriptions.h"
+#include "dme_lookup.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/wait.h>
@@ -10,8 +10,20 @@ namespace {
 const unsigned kCodesPollKey = 0x4543504cu;
 const unsigned kCodePageSize = 4;
 const char kEngineWorker[] = "/var/opt/hmi/data/ID5/Plugins/EngineCodes/engine-codes-qnx";
+const char kEngineProfileFile[] = "/var/opt/hmi/data/ID5/Plugins/EngineCodes/profile.txt";
 
-void format_code_line(char* text, size_t size, const char* line, int length, char* detail, size_t detail_size) {
+// profile.txt holding "n55" selects the F87 M2 N55 descriptions. Anything else keeps the reference.
+bool n55Descriptions() {
+    FILE* file = fopen(kEngineProfileFile, "r");
+    if (!file) return false;
+    char profile[8];
+    const bool n55 = fscanf(file, "%7s", profile) == 1 && !strcmp(profile, "n55");
+    fclose(file);
+    return n55;
+}
+
+void format_code_line(char* text, size_t size, const char* line, int length, char* detail, size_t detail_size,
+                      bool n55) {
     detail[0]=0;
     unsigned code, status;
     int used=0;
@@ -19,13 +31,8 @@ void format_code_line(char* text, size_t size, const char* line, int length, cha
         snprintf(text,size,"%.*s",length,line);
         return;
     }
-    const char* description="Description unavailable";
-    for (unsigned i=0;i<sizeof kDmeDescriptions/sizeof kDmeDescriptions[0];++i) {
-        if (kDmeDescriptions[i].code==code) {
-            description=kDmeDescriptions[i].text;
-            break;
-        }
-    }
+    const char* description=dme_description(code,n55);
+    if (!description) description="Description unavailable";
     snprintf(text,size,"%06X   %s",code,(status & 1u) ? "Active" : (status & 4u) ? "Pending" : "Stored");
     snprintf(detail,detail_size,"%s",description);
 }
@@ -43,6 +50,7 @@ class EngineCodes : public bmw::PluginApp {
     size_t code_size_;
     unsigned code_page_;
     unsigned poll_generation_;
+    bool n55_;
 
     void startCodes(bool clear);
     void pollCodes();
@@ -72,11 +80,12 @@ public:
                 const char* worker=kEngineWorker)
         : PluginApp(dispatcher,name,major,minor,version,config,resources),
           worker_(worker), codes_pid_(-1), codes_fd_(-1), code_size_(0),
-          code_page_(0), poll_generation_(0) {}
+          code_page_(0), poll_generation_(0), n55_(false) {}
 
     virtual ~EngineCodes() { stopWorker(); }
     virtual bool onInit() {
         stopWorker();
+        n55_=n55Descriptions();
         typedef bmw::Delegate<bool,const bmw::Parcel&> Action;
         Action action;
         action.m_obj=this;
@@ -186,7 +195,7 @@ void EngineCodes::renderCodes() {
         const char *end=strchr(line,'\n');
         int length=end ? static_cast<int>(end-line) : static_cast<int>(strlen(line));
         char detail[160];
-        format_code_line(text,sizeof text,line,length,detail,sizeof detail);
+        format_code_line(text,sizeof text,line,length,detail,sizeof detail,n55_);
         updateModel(81u+i,bmw::BasicString<char>(text));
         updateModel(91u+i,bmw::BasicString<char>(detail));
         line=end ? end+1 : "";

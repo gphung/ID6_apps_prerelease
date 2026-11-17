@@ -13,13 +13,17 @@ On some cars the head unit has no route to the HSFZ diagnostic gateway. Without 
 
 Bootmod3 (`bootmod3-qnx`) and xDrive (`xdrive-control-qnx`) stay on HSFZ. They write to the DME and DSC, and read ECUs never seen through the tunnel.
 
+## Gateway addresses
+
+`gateway-ip.txt` holds one to four IPv4 addresses, tried in order, for example the gateway's internal address and then its ENET link-local address. When none connects, a worker sends the HSFZ vehicle identification broadcast (UDP 6811, as ISTA and E-Sys do) at most once every 5 s, connects to the reply marked `DIAGADR10`, and remembers that address in `/tmp/id6-gateway-ip` for the next worker. The broadcast carries no ECU traffic. A failed connect in the rules below means that every address and the broadcast failed. Bootmod3 and xDrive use the same address list and broadcast.
+
 ## When a worker switches
 
 - A loop worker (BoostDeck, ShiftDeck) switches after 5 failed HSFZ connects in a row. A one-shot worker (MHD Maps, engine codes) switches after 1.
 - With no `--host`, a worker goes straight to MOST. The plugins always pass the gateway address, so on a car the switch follows failed connects.
 - Once HSFZ has connected in a process, that process never switches to MOST.
 - A failed MOST open is closed. A loop worker goes back to HSFZ and tries MOST again after 30 s. For a one-shot worker the failure is final.
-- Once on MOST, a worker stays there until it is restarted. If the tunnel drops, a loop worker exits and the plugin starts a new one.
+- A loop worker on MOST tries HSFZ again every 30 s. When HSFZ connects, it closes the tunnel and stays on HSFZ. If the tunnel drops, a loop worker exits and the plugin starts a new one.
 
 The diagnostic workers use automatic fallback by default where supported. The dashboard workers accept a transport override for testing.
 

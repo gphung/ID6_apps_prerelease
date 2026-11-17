@@ -11,6 +11,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -61,6 +62,117 @@ int diag_hsfz_connect(const char *host, unsigned port) {
     return fd;
 }
 
+/* Gateway discovery: the HSFZ vehicle identification broadcast ISTA and E-Sys send. Only the gateway's
+ * reply (DIAGADR10) is used; the head unit answers too, as DIAGADR63. No ECU traffic. */
+enum { HSFZ_HOSTS_MAX = 4, DISCOVERY_PORT = 6811, DISCOVERY_WAIT_MS = 400, DISCOVERY_EVERY_MS = 5000 };
+static uint64_t discovery_at;
+
+static const char *discovery_cache(void) {
+#ifdef MOST_HOST
+    return getenv("ID6_HSFZ_CACHE");   /* host tests only; unset means no cache */
+#else
+    return "/tmp/id6-gateway-ip";       /* RAM disk: the last discovered gateway */
+#endif
+}
+
+static int valid_ipv4(const char *text) {
+    struct in_addr address;
+    return inet_pton(AF_INET, text, &address) == 1;
+}
+
+static int discover_gateway(char *out, size_t size) {
+    struct sockaddr_in to, from;
+    socklen_t from_len;
+    static const unsigned char request[] = {0, 0, 0, 0, 0, 0x11};
+    unsigned char reply[512];
+    const char *target = "169.254.255.255";
+    unsigned port = DISCOVERY_PORT;
+    uint64_t deadline;
+    int fd, on = 1, found = 0;
+#ifdef MOST_HOST
+    /* Host tests only: aim the broadcast at a local fake. */
+    char test_target[32];
+    const char *env = getenv("ID6_HSFZ_DISCOVERY");
+    if (env && strlen(env) < sizeof test_target && strchr(env, ':')) {
+        strcpy(test_target, env);
+        *strchr(test_target, ':') = 0;
+        target = test_target;
+        port = (unsigned)atoi(strchr(env, ':') + 1);
+    }
+#endif
+    memset(&to, 0, sizeof to); to.sin_family = AF_INET; to.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, target, &to.sin_addr) != 1) return 0;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 0;
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
+    if (sendto(fd, request, sizeof request, 0, (struct sockaddr *)&to, sizeof to) != (ssize_t)sizeof request) {
+        close(fd); return 0;
+    }
+    deadline = bd_mono_ms() + DISCOVERY_WAIT_MS;
+    while (!found && ready(fd, POLLIN, deadline)) {
+        ssize_t n, i;
+        from_len = sizeof from;
+        n = recvfrom(fd, reply, sizeof reply, 0, (struct sockaddr *)&from, &from_len);
+        for (i = 6; n > 0 && i + 9 <= n; ++i) {
+            if (!memcmp(reply + i, "DIAGADR10", 9)) {
+                found = inet_ntop(AF_INET, &from.sin_addr, out, (socklen_t)size) != 0;
+                break;
+            }
+        }
+    }
+    close(fd);
+    return found;
+}
+
+static void remember_gateway(const char *host) {
+    const char *path = discovery_cache();
+    FILE *file = path ? fopen(path, "w") : 0;
+    if (!file) return;
+    fprintf(file, "%s\n", host);
+    fclose(file);
+}
+
+static int remembered_gateway(char *out, size_t size) {
+    char text[32];
+    const char *path = discovery_cache();
+    FILE *file = path ? fopen(path, "r") : 0;
+    int ok;
+    if (!file) return 0;
+    ok = fscanf(file, "%31s", text) == 1 && valid_ipv4(text) && strlen(text) < size;
+    fclose(file);
+    if (ok) strcpy(out, text);
+    return ok;
+}
+
+int diag_hsfz_connect_any(const char *hosts, unsigned port) {
+    char list[HSFZ_HOSTS_MAX * 16 + 8], found[16], cached[16];
+    char *candidates[HSFZ_HOSTS_MAX + 1], *next, *save = 0;
+    unsigned count = 0, i;
+    int fd;
+    uint64_t now = bd_mono_ms();
+    if (!hosts || strlen(hosts) >= sizeof list) return -1;
+    strcpy(list, hosts);
+    if (remembered_gateway(cached, sizeof cached)) candidates[count++] = cached;
+    for (next = strtok_r(list, ", ", &save); next && count < HSFZ_HOSTS_MAX + 1; next = strtok_r(0, ", ", &save)) {
+        if (!valid_ipv4(next) || (count && candidates[0] == cached && !strcmp(next, cached))) continue;
+        candidates[count++] = next;
+    }
+    for (i = 0; i < count && diag_running; ++i) {
+        fd = diag_hsfz_connect(candidates[i], port);
+        if (fd < 0) continue;
+        /* A listed address answers again: forget the discovered one so it costs no connect next time. */
+        if (candidates[i] != cached && candidates[0] == cached && discovery_cache()) remove(discovery_cache());
+        return fd;
+    }
+    if (!diag_running || (discovery_at && now < discovery_at + DISCOVERY_EVERY_MS)) return -1;
+    discovery_at = now ? now : 1;
+    if (!discover_gateway(found, sizeof found)) return -1;
+    fprintf(stderr, "gateway: discovered %s\n", found);
+    fd = diag_hsfz_connect(found, port);
+    if (fd >= 0) remember_gateway(found);
+    return fd;
+}
+
 /* Callers supply the UDS service, target, and response prefix. */
 int diag_hsfz_exchange(int fd, unsigned ecu, const unsigned char *uds, unsigned uds_size,
                        const unsigned char *prefix, unsigned prefix_size,
@@ -103,7 +215,7 @@ int diag_hsfz_exchange(int fd, unsigned ecu, const unsigned char *uds, unsigned 
 
 /* A DSI send has no timeout, so once MOST is in use SIGALRM's default action bounds every loop and the
  * shutdown. */
-enum { LOOP_FAILS_TO_MOST = 5, MOST_OPEN_MS = 2000, MOST_RETRY_MS = 30000, MOST_WAIT_MIN_MS = 2000,
+enum { LOOP_FAILS_TO_MOST = 5, HSFZ_FROM_MOST_MS = 30000, MOST_OPEN_MS = 2000, MOST_RETRY_MS = 30000, MOST_WAIT_MIN_MS = 2000,
        LOOP_WATCHDOG_S = 60, STOP_WATCHDOG_S = 15, LOOP_LEASE_WAIT_MS = 300, ONESHOT_LEASE_WAIT_MS = 2000,
        LEASE_POLL_MS = 20, MOST_YIELD_MS = 100 };
 static volatile sig_atomic_t most_armed;
@@ -172,15 +284,49 @@ static int open_most(struct diag_link *l) {
     return 0;
 }
 
+static unsigned hsfz_from_most_ms(void) {
+#ifdef MOST_HOST
+    const char *env = getenv("ID6_HSFZ_FROM_MOST_MS");   /* host tests only */
+    if (env && atoi(env) > 0) return (unsigned)atoi(env);
+#endif
+    return HSFZ_FROM_MOST_MS;
+}
+
+/* A loop worker on MOST tries HSFZ again every HSFZ_FROM_MOST_MS and, when it connects, closes the tunnel
+ * and stays on HSFZ. Single-threaded, so no MOST request is in flight here. */
+static void hsfz_from_most(struct diag_link *l, uint64_t now) {
+    int session = l->cfg.session, lock = -1, fd;
+    l->hsfz_retry_at = now + hsfz_from_most_ms();
+    if (session && (lock = reserve_gateway()) < 0) return;
+    fd = diag_hsfz_connect_any(l->cfg.host, l->cfg.port);
+    if (fd < 0) {
+        if (lock >= 0) close(lock);
+        return;
+    }
+    alarm(STOP_WATCHDOG_S);
+    if (most_close() == 0) most_armed = 0;
+    else l->most_usable = 0;
+    if (diag_running) alarm(0);
+    l->on_most = 0;
+    l->fd = fd; l->lock = lock;
+    l->hsfz_seen = 1; l->hsfz_fails = 0;
+    if (session) l->lease_until = bd_mono_ms()+DIAGNOSTIC_LEASE_MS;
+    fputs("transport: HSFZ\n", stderr);
+}
+
 int diag_link_up(struct diag_link *l) {
     int oneshot = l->cfg.kind == DIAG_ONESHOT, session = l->cfg.session && !oneshot;
     uint64_t now = bd_mono_ms();
-    if (l->on_most) return !l->lost;
+    if (l->on_most) {
+        if (!l->lost && l->cfg.host && !oneshot && diag_running && now >= l->hsfz_retry_at)
+            hsfz_from_most(l, now);
+        return l->on_most ? !l->lost : 1;
+    }
     if (l->fd >= 0) return 1;
     if (l->cfg.host && now >= l->retry_at) {
         if (session) l->lock = reserve_gateway();
         if (!session || l->lock >= 0) {
-            l->fd = diag_hsfz_connect(l->cfg.host, l->cfg.port);
+            l->fd = diag_hsfz_connect_any(l->cfg.host, l->cfg.port);
             l->hsfz_fails = l->fd < 0 ? l->hsfz_fails+1 : 0;
             if (l->fd >= 0) l->hsfz_seen = 1;
             if (l->fd < 0 && session) {
@@ -195,7 +341,7 @@ int diag_link_up(struct diag_link *l) {
         now >= l->most_retry_at &&
         (!l->cfg.host || l->hsfz_fails >= (oneshot ? 1u : (unsigned)LOOP_FAILS_TO_MOST))) {
         l->on_most = open_most(l);
-        if (l->on_most) return 1;
+        if (l->on_most) { l->hsfz_retry_at = bd_mono_ms() + hsfz_from_most_ms(); return 1; }
         if (oneshot) l->most_usable = 0;
         l->most_retry_at = bd_mono_ms()+MOST_RETRY_MS;
         l->hsfz_fails = 0;

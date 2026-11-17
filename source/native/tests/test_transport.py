@@ -5,6 +5,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -43,7 +44,7 @@ def exact(conn, n):
 
 
 class TransportTest(unittest.TestCase):
-    def run_collector(self, mode="normal", extra=(), cycles=1, env=None):
+    def run_collector(self, mode="normal", extra=(), cycles=1, env=None, host="127.0.0.1"):
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.bind(("127.0.0.1", 0))
         udp.settimeout(4)
@@ -118,7 +119,7 @@ class TransportTest(unittest.TestCase):
         t = threading.Thread(target=gateway, daemon=True)
         t.start()
         try:
-            result = subprocess.run([BIN, "--host", "127.0.0.1", "--port", str(server.getsockname()[1]),
+            result = subprocess.run([BIN, "--host", host, "--port", str(server.getsockname()[1]),
                                      "--udp-port", str(udp.getsockname()[1]), "--cycles", str(cycles), *extra],
                                     capture_output=True, text=True, timeout=10, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -385,6 +386,90 @@ class TransportTest(unittest.TestCase):
         self.assertLess(len(rail), len(oil) / 2)
         gaps = [b - a for a, b in zip(rail[1:], rail[2:])]  # the first two are the initial scan
         self.assertTrue(gaps and all(450 < g < 700 for g in gaps), gaps)
+
+    def test_gateway_list_tries_each_address_in_order(self):
+        p, requests, _ = self.run_collector(host="127.0.0.2,not-an-ip,127.0.0.1")
+        self.assertEqual(len(requests), 9)
+        self.assertEqual(int(p[3]), 255)
+
+    def test_discovery_finds_the_gateway_when_no_listed_address_answers(self):
+        responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        responder.bind(("127.0.0.1", 0))
+        responder.settimeout(4)
+        seen = []
+
+        def answer():
+            data, peer = responder.recvfrom(64)
+            seen.append(data)
+            # The head unit replies too; only the gateway's DIAGADR10 counts.
+            for tag in (b"DIAGADR63", b"DIAGADR10"):
+                body = tag + b"BMWMAC001122334455BMWVINTESTVIN0000000000"
+                responder.sendto(struct.pack(">IH", len(body), 0x11) + body, peer)
+
+        threading.Thread(target=answer, daemon=True).start()
+        with tempfile.TemporaryDirectory() as directory:
+            cache = os.path.join(directory, "gateway")
+            env = dict(os.environ, ID6_HSFZ_DISCOVERY="127.0.0.1:%d" % responder.getsockname()[1],
+                       ID6_HSFZ_CACHE=cache)
+            p, requests, err = self.run_collector(env=env, host="127.0.0.2")
+            responder.close()
+            self.assertEqual(seen, [bytes.fromhex("000000000011")])
+            self.assertIn("gateway: discovered 127.0.0.1", err)
+            self.assertEqual(int(p[3]), 255)
+            with open(cache) as f:
+                self.assertEqual(f.read().strip(), "127.0.0.1")
+            # The next worker starts from the remembered address, without a broadcast.
+            p, requests, err = self.run_collector(env=dict(env, ID6_HSFZ_DISCOVERY="127.0.0.1:1"), host="127.0.0.2")
+            self.assertNotIn("discovered", err)
+            self.assertEqual(int(p[3]), 255)
+
+    def test_loop_worker_returns_from_most_to_hsfz(self):
+        port = self.closed_port()
+        requests = []
+
+        def gateway_later():
+            time.sleep(1.5)  # the worker is on MOST by then
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", port))
+            server.listen(1)
+            server.settimeout(6)
+            try:
+                conn, _ = server.accept()
+                with conn:
+                    conn.settimeout(3)
+                    while True:
+                        length, _ = struct.unpack(">IH", exact(conn, 6))
+                        req = exact(conn, length)
+                        requests.append(req)
+                        did = int.from_bytes(req[3:], "big")
+                        conn.sendall(frame(1, bytes([req[1], 0xF4, 0x62]) + req[3:] + VALUES[did]))
+            except (OSError, EOFError):
+                pass
+            finally:
+                server.close()
+
+        t = threading.Thread(target=gateway_later, daemon=True)
+        t.start()
+        env = dict(os.environ, ID6_FAKE_MOST="up", ID6_HSFZ_FROM_MOST_MS="400")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.bind(("127.0.0.1", 0))
+            udp.settimeout(.5)
+            r = subprocess.run([BIN, "--host", "127.0.0.1", "--port", str(port), "--udp-port",
+                                str(udp.getsockname()[1]), "--cycles", "30"],
+                               capture_output=True, text=True, timeout=30, env=env)
+            packets = []
+            try:
+                while True:
+                    packets.append(udp.recv(512).decode().split())
+            except socket.timeout:
+                pass
+        t.join(8)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(r.stderr.index("transport: MOST"), r.stderr.index("transport: HSFZ"))
+        self.assertIn("FAKE-MOST exit", r.stderr)            # the tunnel was closed
+        self.assertTrue(any(req[1] == 0x18 for req in requests))  # EGS is back on HSFZ
+        self.assertEqual(int(packets[-1][3]), 255)
 
     def test_unknown_profile_is_rejected(self):
         r = subprocess.run([BIN, "--host", "127.0.0.1", "--profile", "b58"], capture_output=True)

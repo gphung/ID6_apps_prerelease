@@ -46,9 +46,10 @@ build/test-most: tests/test_most.c $(MOST) $(FAKE_DSI) $(MOST_HEADERS) | build
 build/test-diag-link: tests/test_diag_link.c $(CORE_LINK) $(MOST) tests/fake_most_env.c $(FAKE_DSI) $(HEADERS) $(MOST_HEADERS) | build
 	$(HOST_LINK) $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway
 	./build/test-core
 	./build/test-dme-lookup
+	./build/test-diagnostic-gateway
 	./build/test-most
 	./build/test-diag-link
 	$(PYTHON) -B tests/test_drive_apps.py
@@ -57,3 +58,6 @@ test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-cod
 
 build/test-dme-lookup: tests/test_dme_lookup.c src/dme_lookup.h src/dme_descriptions.h src/dme_descriptions_n55.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_dme_lookup.c -o $@
+
+build/test-diagnostic-gateway: tests/test_diagnostic_gateway.cpp src/diagnostic_gateway.h | build
+	$(CXX) -O2 -Wall -Wextra -Werror -Isrc tests/test_diagnostic_gateway.cpp -o $@

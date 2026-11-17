@@ -45,7 +45,7 @@ static int exchange(control_link link, unsigned ecu, const unsigned char *uds, u
 #else
 /* The shared MOST tunnel cannot address DSC, EGS or the transfer case. */
 static void stop(int sig) { (void)sig; diag_running = 0; }
-static int connect_gw(const char *host, unsigned port) { return diag_hsfz_connect(host, port); }
+static int connect_gw(const char *host, unsigned port) { return diag_hsfz_connect_any(host, port); }
 static int exchange(int fd, unsigned ecu, const unsigned char *uds, unsigned uds_size,
                     const unsigned char *prefix, unsigned prefix_size,
                     unsigned char *reply, unsigned reply_size, unsigned timeout_ms,

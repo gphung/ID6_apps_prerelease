@@ -17,6 +17,7 @@ struct diag_link {
     int hsfz_seen;                    /* HSFZ has connected: never switch to MOST */
     unsigned hsfz_fails;              /* failed HSFZ connects in a row */
     uint64_t retry_at, lease_until, most_retry_at;
+    uint64_t hsfz_retry_at;           /* a loop worker on MOST tries HSFZ again from then */
     uint64_t most_yield_until;        /* a loop worker on MOST waits until then before its next request */
 };
 
@@ -43,6 +44,10 @@ void diag_link_close(struct diag_link *);      /* bounded shutdown */
 /* Plain HSFZ, for workers that never use MOST: a connected fd or -1, and one request on it with
    diag_link_request's return values, without -3. Both stop early once diag_running is cleared. */
 int  diag_hsfz_connect(const char *host, unsigned port);
+/* hosts: up to four IPv4 addresses separated by commas, tried in order after the address last found by
+   discovery (cached in /tmp). When none connects, the HSFZ vehicle identification broadcast (UDP 6811, at
+   most once every 5 s per process) finds the gateway (DIAGADR10). A connected fd or -1. */
+int  diag_hsfz_connect_any(const char *hosts, unsigned port);
 int  diag_hsfz_exchange(int fd, unsigned ecu, const unsigned char *uds, unsigned n,
                         const unsigned char *prefix, unsigned pn, unsigned char *reply, unsigned cap,
                         unsigned timeout_ms, unsigned *negative);

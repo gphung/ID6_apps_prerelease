@@ -34,6 +34,13 @@ const unsigned kActivePollIntervalMs = 25u;
 const unsigned kIdlePollIntervalMs = 250u;
 const char kCollector[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/boostdeck-collector-qnx";
 const char kProfileFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/profile.txt";
+#ifdef PERF_LAB
+// N55 unit choices, saved when changed: "<c|f> <psi|bar>". Defaults: Celsius and psi.
+const char kUnitsFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/units.txt";
+const char kUnitsTemp[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/units.tmp";
+// N55 layout (tools/make_n55_layout.py) OPTIONS actions.
+const unsigned kCelsiusAction = 70u, kFahrenheitAction = 71u, kPsiAction = 72u, kBarAction = 73u;
+#endif
 
 // profile.txt holding "n55" selects the F87 M2 N55 reads (SIGNALS.md). Anything else keeps the reference.
 bool n55Profile() {
@@ -84,6 +91,16 @@ class BoostDeck : public bmw::PluginApp {
     unsigned color_;
 #ifdef PERF_LAB
     bool metric_;
+    bool celsius_;      // N55: temperature tiles in C
+    bool bar_;          // N55: pressure tiles in bar
+    void loadUnits();
+    void saveUnits() const;
+    bool metricFor(unsigned slot) const {
+        if (!n55_) return metric_;
+        if (slot==BD_IAT || slot==BD_TRANS || slot==BD_COOLANT) return celsius_;
+        if (slot==BD_BOOST || slot==BD_RAIL || slot==BD_OIL) return bar_;
+        return false;
+    }
 #endif
     uint64_t retry_at_;
     void startVisibleCollector();
@@ -98,7 +115,7 @@ public:
           received_(0), collector_(-1), stopping_(false), n55_(false), oil_band_(-1), gauges_visible_(false),
           color_(0),
 #ifdef PERF_LAB
-          metric_(false),
+          metric_(false), celsius_(true), bar_(false),
 #endif
           retry_at_(0) {
         resetDisplay();
@@ -115,6 +132,18 @@ public:
 #ifdef PERF_LAB
     template <bool Metric> bool changeUnits(const bmw::Parcel&) {
         metric_=Metric;
+        refresh();
+        return true;
+    }
+    template <bool Celsius> bool changeTemperature(const bmw::Parcel&) {
+        celsius_=Celsius;
+        saveUnits();
+        refresh();
+        return true;
+    }
+    template <bool Bar> bool changePressure(const bmw::Parcel&) {
+        bar_=Bar;
+        saveUnits();
         refresh();
         return true;
     }
@@ -195,6 +224,17 @@ bool BoostDeck::onInit() {
     addHandler(49u,action);
     action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changeUnits<true> >;
     addHandler(59u,action);
+    if (n55_) {
+        loadUnits();
+        action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changeTemperature<true> >;
+        addHandler(kCelsiusAction,action);
+        action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changeTemperature<false> >;
+        addHandler(kFahrenheitAction,action);
+        action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changePressure<false> >;
+        addHandler(kPsiAction,action);
+        action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changePressure<true> >;
+        addHandler(kBarAction,action);
+    }
 #endif
     selectColor(color_);
     bmw::Parcel visible(true);
@@ -222,6 +262,30 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
     }
     return true;
 }
+
+#ifdef PERF_LAB
+void BoostDeck::loadUnits() {
+    celsius_=true;
+    bar_=false;
+    FILE* file=fopen(kUnitsFile,"r");
+    if (!file) return;
+    char temperature[4], pressure[4];
+    if (fscanf(file,"%3s %3s",temperature,pressure)==2) {
+        if (!strcmp(temperature,"f")) celsius_=false;
+        if (!strcmp(pressure,"bar")) bar_=true;
+    }
+    fclose(file);
+}
+
+// Written beside the plugin and renamed into place, so a reset never leaves half a file.
+void BoostDeck::saveUnits() const {
+    FILE* file=fopen(kUnitsTemp,"w");
+    if (!file) return;
+    const bool written=fprintf(file,"%s %s\n",celsius_ ? "c" : "f",bar_ ? "bar" : "psi")>0;
+    if (fclose(file)==0 && written) rename(kUnitsTemp,kUnitsFile);
+    else remove(kUnitsTemp);
+}
+#endif
 
 void BoostDeck::startVisibleCollector() {
     if (!gauges_visible_ || collector_>0 || fd_<0 ||
@@ -305,7 +369,7 @@ void BoostDeck::refresh() {
             double reading = bd_display_value(i,x,0);
             if (i==BD_BOOST && fabs(reading)<0.05) reading=0;
 #ifdef PERF_LAB
-            if (metric_) {
+            if (metricFor(i)) {
                 const char* units=i==BD_AFR ? "" : i==BD_TIMING ? "deg" :
                     i==BD_IAT || i==BD_TRANS || i==BD_COOLANT ? "\260C" : "bar";
                 snprintf(label,sizeof label,"%.1f%s%s",bd_display_value(i,x,1),*units ? " " : "",units);

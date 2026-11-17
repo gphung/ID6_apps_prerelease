@@ -462,12 +462,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--session")) session = 1;
         else if (!strcmp(argv[i], "--trace")) trace_reads = 1;
         else if (!strcmp(argv[i], "--no-trans")) no_trans = 1;
-        /* F87 M2 N55, manual: no EGS, rail DID 56D7 answers NRC 31, and DID 4300
-         * returns one byte. Coolant uses OBD 01 05 instead. Captured 2026-11-16. */
+        /* F87 M2 N55, manual: no EGS, so the transmission slot carries DME oil
+         * temperature (4408). Rail DID 56D7 answers NRC 31, and DID 4300 returns one
+         * byte, so coolant uses OBD 01 05. Captured 2026-11-16. */
         else if (!strcmp(argv[i], "--profile") && i+1 < (unsigned)argc &&
                  (!strcmp(argv[i+1], "n55") || !strcmp(argv[i+1], "reference"))) {
             n55 = !strcmp(argv[++i], "n55");
-            if (n55) no_trans = 1;
         }
         else if (!strcmp(argv[i], "--host") && i+1 < (unsigned)argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < (unsigned)argc) port = number(argv[++i],1,65535);
@@ -515,13 +515,13 @@ int main(int argc, char **argv) {
             int up;
             diag_link_tick(&link);
             up = diag_link_up(&link);
-            if (diag_link_on_most(&link)) f.valid &= ~(1u << BD_TRANS); /* no EGS reads on MOST */
+            if (diag_link_on_most(&link) && !n55) f.valid &= ~(1u << BD_TRANS); /* no EGS reads on MOST */
             for (i=0; up && i < sizeof dids / sizeof dids[0] && diag_running; ++i) {
                 double v = 0;
                 int rc;
                 unsigned kept;
                 int on_most = diag_link_on_most(&link);
-                if ((no_trans || on_most) && dids[i] == 0xda12) continue;
+                if (!n55 && (no_trans || on_most) && dids[i] == 0xda12) continue;
                 if (n55 && dids[i] == 0x56d7) continue;
                 if ((session || on_most) && start < failed_until[i]) continue;
                 if (!full_scan && periods[i] && start < due[i]) continue;
@@ -532,8 +532,9 @@ int main(int argc, char **argv) {
                 }
                 kept = i != 0 ? f.valid & (1u << (i-1)) : 0;
                 f.valid &= ~kept;
-                rc = n55 && dids[i] == 0x4300 ? read_obd(&link, 0x05, &v)
-                   : read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);
+                if (n55 && dids[i] == 0x4300) rc = read_obd(&link, 0x05, &v);
+                else if (n55 && dids[i] == 0xda12) rc = read_did(&link, 0x12, 0x4408, &v); /* oil temp */
+                else rc = read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);
                 if (rc == -3) { /* skip it for a while; a value still fresh stays shown */
                     failed_until[i] = bd_mono_ms()+2000;
                     if (kept) {

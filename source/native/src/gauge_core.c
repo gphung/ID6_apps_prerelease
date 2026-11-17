@@ -37,6 +37,7 @@ int bd_decode_did(unsigned did, const unsigned char *p, size_t n, double *out) {
     case 0x56d7: if (r == 65535) return 0; x = r / 50.0; lo = 0; hi = 500; break; /* rail bar */
     case 0x586f: if (r == 65535) return 0; x = r / 1000.0; lo = 0; hi = 20; break; /* oil bar */
     case 0x4300: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 150; break;
+    case 0x4408: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 170; break; /* oil C */
     default: return 0;
     }
     if (!isfinite(x) || x < lo || x > hi) return 0;
@@ -58,6 +59,19 @@ int bd_decode_pid(unsigned pid, const unsigned char *p, size_t n, double *out) {
     }
     *out = x;
     return 1;
+}
+
+/* Oil warm-up band for the N55 profile. Each band starts at its threshold on the way up
+ * and ends BD_OIL_BAND_HYSTERESIS_C below it on the way down, so a reading sitting on a
+ * threshold does not flicker. previous is the band last shown, or -1 for none. */
+int bd_oil_band(double celsius, int previous) {
+    static const double up[] = {BD_OIL_WARMING_C, BD_OIL_READY_C, BD_OIL_HOT_C};
+    int band = 0, i;
+    if (!isfinite(celsius)) return -1;
+    for (i = 0; i < 3; ++i) if (celsius >= up[i]) band = i + 1;
+    if (previous > band && previous <= 3 &&
+        celsius > up[previous - 1] - BD_OIL_BAND_HYSTERESIS_C) band = previous;
+    return band;
 }
 
 int bd_encode(const bd_frame *f, char *out, size_t len) {

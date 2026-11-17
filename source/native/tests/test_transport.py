@@ -23,7 +23,8 @@ CAR_VALUES.update({did: VALUES[did] for did in (0x56D7, 0x586F, 0x4300)})
 N55_VALUES = {0x4201: bytes.fromhex("652e"), 0x4205: bytes.fromhex("3297"),
               0x5889: bytes.fromhex("ffff"), 0x4A49: bytes.fromhex("0000"),
               0x580F: bytes.fromhex("4d"), 0x586F: bytes.fromhex("0417"),
-              0x4300: bytes.fromhex("4b"), 0x05: bytes.fromhex("30")}
+              0x4300: bytes.fromhex("4b"), 0x05: bytes.fromhex("30"),
+              0x4408: bytes.fromhex("0afc")}  # oil temperature, not in the engine-off capture
 
 
 def frame(ctrl, body):
@@ -72,6 +73,8 @@ class TransportTest(unittest.TestCase):
                         if obd:
                             self.assertEqual(mode, "n55")
                         self.assertEqual(ecu, 0x18 if did == 0xDA12 else 0x12)
+                        if did == 0x4408:
+                            self.assertEqual(mode, "n55")
                         if mode == "timeout":
                             time.sleep(.8)
                             return
@@ -353,19 +356,23 @@ class TransportTest(unittest.TestCase):
                 _, err = proc.communicate()
         self.assertIn("FAKE-MOST exit unregister_target=1 unregister_client=1 free=1", err)
 
-    def test_n55_profile_skips_egs_and_rail_and_reads_obd_coolant(self):
+    def test_n55_profile_reads_oil_temp_and_obd_coolant_without_egs_or_rail(self):
         p, requests, trace = self.run_collector("n55", ("--profile", "n55", "--trace"))
-        self.assertEqual(len(requests), 7)
-        self.assertTrue(all(r[1] == 0x12 for r in requests))
+        self.assertEqual(len(requests), 8)
+        self.assertTrue(all(r[1] == 0x12 for r in requests))  # never the EGS
         self.assertIn(bytes.fromhex("f4120105"), requests)
+        self.assertIn(bytes.fromhex("f412224408"), requests)
         self.assertNotIn(bytes.fromhex("f412224300"), requests)
-        self.assertNotIn(bytes.fromhex("f41222 56d7".replace(" ", "")), requests)
-        # boost, timing, IAT, oil and coolant valid; AFR, trans and rail blank
-        self.assertEqual(int(p[3]), 0b11001101)
+        self.assertNotIn(bytes.fromhex("f41222da12"), requests)
+        self.assertNotIn(bytes.fromhex("f4122256d7"), requests)
+        # boost, timing, IAT, oil temp (trans slot), oil pressure and coolant valid; AFR and rail blank
+        self.assertEqual(int(p[3]), 0b11011101)
         self.assertAlmostEqual(float(p[5]), 0, places=1)
         self.assertAlmostEqual(float(p[11]), 9.75)
+        self.assertAlmostEqual(float(p[13]), 281.2-273.15, places=4)
         self.assertAlmostEqual(float(p[17]), 1.047)
         self.assertAlmostEqual(float(p[19]), 8)
+        self.assertIn("did=4408 payload=0AFC decoded=", trace)
         self.assertIn("pid=05 payload=30 decoded=8.000000", trace)
         self.assertIn("F87 M2 N55 candidate profile", trace)
 

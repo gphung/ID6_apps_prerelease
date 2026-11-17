@@ -97,6 +97,29 @@ int main(void) {
       check(0x586f,oil,2,1.047);
       assert(!bd_decode_did(0x5889,lambda_engine_off,2,&x));
       check(0x4201,ambient,2,25902/256.0); check(0x4205,manifold,2,12951/128.0); }
+    { /* N55 oil temperature (DME 4408) and warm-up bands: 180 F warming, 194 F ready,
+         266 F hot, each held 1 C below its threshold on the way down. */
+      const unsigned char oil_cold[]={0x0a,0xfc}, oil_absent[]={0xff,0xff};
+      const double warming=(180.0-32)/1.8, ready=(194.0-32)/1.8, hot=(266.0-32)/1.8;
+      check(0x4408,oil_cold,2,281.2-273.15);
+      x=123; assert(!bd_decode_did(0x4408,oil_absent,2,&x) && x==123);
+      assert(!bd_decode_did(0x4408,oil_cold,1,&x));
+      assert(bd_oil_band(20,-1)==BD_OIL_COLD);
+      assert(bd_oil_band(warming-.01,-1)==BD_OIL_COLD);
+      assert(bd_oil_band(warming,-1)==BD_OIL_WARMING);
+      assert(bd_oil_band(ready,BD_OIL_WARMING)==BD_OIL_READY);
+      assert(bd_oil_band(hot,BD_OIL_READY)==BD_OIL_HOT);
+      assert(bd_oil_band(ready-.5,BD_OIL_READY)==BD_OIL_READY);   /* inside the buffer */
+      assert(bd_oil_band(ready-1.01,BD_OIL_READY)==BD_OIL_WARMING);
+      assert(bd_oil_band(ready-.5,BD_OIL_WARMING)==BD_OIL_WARMING); /* no jump up early */
+      assert(bd_oil_band(warming-.5,BD_OIL_WARMING)==BD_OIL_WARMING);
+      assert(bd_oil_band(warming-1.01,BD_OIL_WARMING)==BD_OIL_COLD);
+      assert(bd_oil_band(hot-.5,BD_OIL_HOT)==BD_OIL_HOT);
+      assert(bd_oil_band(100,BD_OIL_HOT)==BD_OIL_READY);
+      assert(bd_oil_band(60,BD_OIL_HOT)==BD_OIL_COLD);
+      assert(bd_oil_band(150,-1)==BD_OIL_HOT);
+      assert(bd_oil_band(NAN,BD_OIL_READY)==-1);
+      assert(fabs(warming-82.2222)<.001 && fabs(ready-90)<1e-9 && fabs(hot-130)<1e-9); }
     test_parser_boundaries();
     memset(&f,0,sizeof f); f.seq=123; f.valid=31; f.sent_ms=1234567890123ULL;
     f.value[0]=18.25; f.value[1]=14.7;

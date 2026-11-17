@@ -22,6 +22,7 @@ typedef struct {
 uint64_t bd_mono_ms(void);
 int bd_decode_did(unsigned did, const unsigned char *data, size_t len, double *out);
 int bd_decode_pid(unsigned pid, const unsigned char *data, size_t len, double *out);
+int bd_decode_n55(unsigned did, const unsigned char *data, size_t len, double *out);
 /* N55 oil warm-up bands: 0 cold, 1 warming (180 F), 2 ready (194 F), 3 hot (266 F). */
 enum { BD_OIL_COLD, BD_OIL_WARMING, BD_OIL_READY, BD_OIL_HOT };
 #define BD_OIL_WARMING_C ((180.0 - 32) / 1.8)

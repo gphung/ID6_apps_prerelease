@@ -97,13 +97,21 @@ int main(void) {
       check(0x586f,oil,2,1.047);
       assert(!bd_decode_did(0x5889,lambda_engine_off,2,&x));
       check(0x4201,ambient,2,25902/256.0); check(0x4205,manifold,2,12951/128.0); }
-    { /* N55 oil temperature (DME 4408) and warm-up bands: 180 F warming, 194 F ready,
-         266 F hot, each held 1 C below its threshold on the way down. */
-      const unsigned char oil_cold[]={0x0a,0xfc}, oil_absent[]={0xff,0xff};
+    { /* N55 (mevd172y SG_FUNKTIONEN): oil temperature 4408 is signed x 0.1 C, rail 58EF is
+         x 0.0005 MPa; other DIDs keep the reference decoders. Warm-up bands: 180 F warming,
+         194 F ready, 266 F hot, each held 1 C below its threshold on the way down. */
+      const unsigned char oil_cold[]={0x00,0x50}, oil_hot[]={0x03,0x84}, oil_frozen[]={0xff,0x9c};
+      const unsigned char rail[]={0x4e,0x20}, rail_absent[]={0xff,0xff}, iat_n55[]={0x4d};
       const double warming=(180.0-32)/1.8, ready=(194.0-32)/1.8, hot=(266.0-32)/1.8;
-      check(0x4408,oil_cold,2,281.2-273.15);
-      x=123; assert(!bd_decode_did(0x4408,oil_absent,2,&x) && x==123);
-      assert(!bd_decode_did(0x4408,oil_cold,1,&x));
+      double y=0;
+      assert(bd_decode_n55(0x4408,oil_cold,2,&y) && fabs(y-8)<1e-9);
+      assert(bd_decode_n55(0x4408,oil_hot,2,&y) && fabs(y-90)<1e-9);
+      assert(bd_decode_n55(0x4408,oil_frozen,2,&y) && fabs(y+10)<1e-9);
+      x=123; assert(!bd_decode_n55(0x4408,oil_cold,1,&x) && x==123);
+      assert(!bd_decode_did(0x4408,oil_cold,2,&x));   /* not a reference DID */
+      assert(bd_decode_n55(0x58ef,rail,2,&y) && fabs(y-100)<1e-9);   /* 20000 x 0.005 bar */
+      assert(!bd_decode_n55(0x58ef,rail_absent,2,&x));
+      assert(bd_decode_n55(0x580f,iat_n55,1,&y) && fabs(y-9.75)<1e-9);
       assert(bd_oil_band(20,-1)==BD_OIL_COLD);
       assert(bd_oil_band(warming-.01,-1)==BD_OIL_COLD);
       assert(bd_oil_band(warming,-1)==BD_OIL_WARMING);

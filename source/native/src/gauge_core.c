@@ -37,10 +37,30 @@ int bd_decode_did(unsigned did, const unsigned char *p, size_t n, double *out) {
     case 0x56d7: if (r == 65535) return 0; x = r / 50.0; lo = 0; hi = 500; break; /* rail bar */
     case 0x586f: if (r == 65535) return 0; x = r / 1000.0; lo = 0; hi = 20; break; /* oil bar */
     case 0x4300: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 150; break;
-    case 0x4408: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 170; break; /* oil C */
     default: return 0;
     }
     if (!isfinite(x) || x < lo || x > hi) return 0;
+    *out = x;
+    return 1;
+}
+
+/* F87 M2 N55 (SGBD mevd172y, SG_FUNKTIONEN) where it differs from the reference decoders:
+ * 4408 oil temperature, signed x 0.1 C; 58EF filtered rail pressure, unsigned x 0.0005 MPa
+ * (0.005 bar). Other DIDs use bd_decode_did. */
+int bd_decode_n55(unsigned did, const unsigned char *p, size_t n, double *out) {
+    unsigned r;
+    double x;
+    if (did != 0x4408 && did != 0x58ef) return bd_decode_did(did, p, n, out);
+    if (!p || !out || n != 2) return 0;
+    r = ((unsigned)p[0] << 8) | p[1];
+    if (did == 0x4408) {
+        x = (r & 0x8000 ? (int)r - 65536 : (int)r) / 10.0;
+        if (x < -48 || x > 170) return 0;
+    } else {
+        if (r == 65535) return 0;
+        x = r * 0.005;
+        if (x > 300) return 0;
+    }
     *out = x;
     return 1;
 }

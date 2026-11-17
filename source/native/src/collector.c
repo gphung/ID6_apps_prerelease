@@ -352,10 +352,12 @@ int main(int argc, char **argv) {
 #include "most/most_link.h"
 
 static int trace_reads = 0;
+static int profile_n55 = 0; /* --profile n55: bd_decode_n55 */
 static void pause_ms(int ms) { while (diag_running && poll(0, 0, ms) < 0 && errno == EINTR) {} }
 
 static int decode_reply(unsigned ecu, unsigned did, const unsigned char *reply, int n, double *value) {
-    int decoded=bd_decode_did(did,reply+3,(size_t)n-3,value);
+    int decoded=profile_n55 ? bd_decode_n55(did,reply+3,(size_t)n-3,value)
+                            : bd_decode_did(did,reply+3,(size_t)n-3,value);
     int i;
     if (trace_reads) {
         fprintf(stderr,"RAW mono_ms=%llu ecu=%02X did=%04X payload=",
@@ -462,12 +464,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--session")) session = 1;
         else if (!strcmp(argv[i], "--trace")) trace_reads = 1;
         else if (!strcmp(argv[i], "--no-trans")) no_trans = 1;
-        /* F87 M2 N55, manual: no EGS, so the transmission slot carries DME oil
-         * temperature (4408). Rail DID 56D7 answers NRC 31, and DID 4300 returns one
-         * byte, so coolant uses OBD 01 05. Captured 2026-11-16. */
+        /* F87 M2 N55 (mevd172y), manual: no EGS, so the transmission slot carries DME oil
+         * temperature (4408). Rail pressure is 58EF (56D7 answers NRC 31), oil pressure
+         * 586F is absolute hPa and shown relative to ambient, and coolant uses OBD 01 05.
+         * Captured 2026-11-16. */
         else if (!strcmp(argv[i], "--profile") && i+1 < (unsigned)argc &&
                  (!strcmp(argv[i+1], "n55") || !strcmp(argv[i+1], "reference"))) {
-            n55 = !strcmp(argv[++i], "n55");
+            n55 = profile_n55 = !strcmp(argv[++i], "n55");
         }
         else if (!strcmp(argv[i], "--host") && i+1 < (unsigned)argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < (unsigned)argc) port = number(argv[++i],1,65535);
@@ -522,7 +525,6 @@ int main(int argc, char **argv) {
                 unsigned kept;
                 int on_most = diag_link_on_most(&link);
                 if (!n55 && (no_trans || on_most) && dids[i] == 0xda12) continue;
-                if (n55 && dids[i] == 0x56d7) continue;
                 if ((session || on_most) && start < failed_until[i]) continue;
                 if (!full_scan && periods[i] && start < due[i]) continue;
                 if (full_scan) due[i]=start+first_delay[i];
@@ -534,6 +536,7 @@ int main(int argc, char **argv) {
                 f.valid &= ~kept;
                 if (n55 && dids[i] == 0x4300) rc = read_obd(&link, 0x05, &v);
                 else if (n55 && dids[i] == 0xda12) rc = read_did(&link, 0x12, 0x4408, &v); /* oil temp */
+                else if (n55 && dids[i] == 0x56d7) rc = read_did(&link, 0x12, 0x58ef, &v); /* rail */
                 else rc = read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);
                 if (rc == -3) { /* skip it for a while; a value still fresh stays shown */
                     failed_until[i] = bd_mono_ms()+2000;
@@ -566,6 +569,10 @@ int main(int argc, char **argv) {
                     v = (v-ambient) * .145037738; /* kPa absolute - measured ambient -> gauge psi */
                 }
                 if (i == 2) v *= 14.7; /* measured lambda -> gasoline-equivalent AFR */
+                if (n55 && dids[i] == 0x586f) { /* absolute hPa on the N55 -> gauge bar */
+                    if (!have_ambient || bd_mono_ms()-ambient_time > 1800) continue;
+                    v -= ambient / 100.0;
+                }
                 f.value[i-1]=v; observed[i-1]=bd_mono_ms(); f.valid |= 1u << (i-1);
                 /* A tunnel read is slow, so each new value goes out at once. */
                 if (diag_link_on_most(&link) && !send_frame(sock,&dest,&f,observed)) { perror("send frame"); diag_running=0; }

@@ -12,9 +12,22 @@
 namespace {
 const unsigned kShiftPoll=0x53484654u;
 const char kShiftWorker[]="/var/opt/hmi/data/ID5/Plugins/ShiftDeck/shift-deck-qnx";
+const char kShiftProfile[]="/var/opt/hmi/data/ID5/Plugins/ShiftDeck/profile.txt";
+
+// profile.txt holding "n55" reads RPM and speed as one DME request (SIGNALS.md).
+bool shiftN55Profile() {
+    FILE* file=fopen(kShiftProfile,"r");
+    if (!file) return false;
+    char profile[8];
+    const bool n55=fscanf(file,"%7s",profile)==1 && !strcmp(profile,"n55");
+    fclose(file);
+    return n55;
+}
 #ifdef NATIVE_SHIFT_SMOOTH
 const unsigned kSweepSteps=128, kSweepBase=56400, kSweepAlert=56529;
-const unsigned kEaseMs=50;
+// The bar eases from the shown RPM to each new reading over the time readings arrive apart, so it
+// keeps moving between readings instead of stepping. The shift alert follows the raw reading.
+const unsigned kEaseMinMs=50, kEaseMaxMs=200;
 #endif
 }
 
@@ -33,9 +46,10 @@ class ShiftDeck : public bmw::PluginApp {
     bool metric_;
     double rpm_from_;
     uint64_t rpm_started_;
+    unsigned ease_ms_;
     double animatedRpm(uint64_t now) const {
-        if (!rpm_started_ || now-rpm_started_>=kEaseMs) return frame_.rpm;
-        const double remaining=1.-static_cast<double>(now-rpm_started_)/kEaseMs;
+        if (!rpm_started_ || now-rpm_started_>=ease_ms_) return frame_.rpm;
+        const double remaining=1.-static_cast<double>(now-rpm_started_)/ease_ms_;
         return frame_.rpm+(rpm_from_-frame_.rpm)*remaining*remaining;
     }
 #endif
@@ -169,6 +183,7 @@ public:
         metric_=false;
         rpm_from_=0;
         rpm_started_=0;
+        ease_ms_=kEaseMinMs;
 #endif
     }
     virtual ~ShiftDeck() { shutdown(); }
@@ -230,7 +245,8 @@ public:
         uint64_t now=bd_mono_ms();
         if (visible_ && child_<=0 && now>=retry_at_) {
             const DiagnosticGateway gateway("/var/opt/hmi/data/ID5/Plugins/" "ShiftDeck" "/gateway-ip.txt");
-            const char* args[]={kShiftWorker,"--host",gateway.host(),0};
+            const bool n55=shiftN55Profile();
+            const char* args[]={kShiftWorker,"--host",gateway.host(),n55 ? "--profile" : 0,"n55",0};
             child_=launch(args,-1);
             retry_at_=now+1000;
         }
@@ -247,6 +263,8 @@ public:
                                           now-frame_.sampled_ms<DRIVE_STALE_MS;
                     rpm_from_=continuous ? animatedRpm(now) : next.rpm;
                     rpm_started_=continuous ? now : 0;
+                    const uint64_t gap=continuous ? next.sampled_ms-frame_.sampled_ms : 0;
+                    ease_ms_=gap<kEaseMinMs ? kEaseMinMs : gap>kEaseMaxMs ? kEaseMaxMs : static_cast<unsigned>(gap);
                 }
 #endif
                 frame_=next;

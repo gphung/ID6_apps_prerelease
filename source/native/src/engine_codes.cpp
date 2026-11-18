@@ -2,6 +2,7 @@
 #include "diagnostic_worker.h"
 #include "diagnostic_gateway.h"
 #include "dme_lookup.h"
+#include "fault_text.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/wait.h>
@@ -22,19 +23,32 @@ bool n55Descriptions() {
     return n55;
 }
 
-void format_code_line(char* text, size_t size, const char* line, int length, char* detail, size_t detail_size,
-                      bool n55) {
-    detail[0]=0;
+// One worker line as a list row (code button and short summary) and its detail page (four lines).
+struct CodeRow {
+    bool code;
+    char button[40], summary[96], lines[4][96];
+};
+
+void format_code_row(const char* line, int length, bool n55, CodeRow& row) {
+    memset(&row,0,sizeof row);
     unsigned code, status;
-    int used=0;
-    if (sscanf(line,"%6x  status %2x%n",&code,&status,&used)!=2 || used!=length) {
-        snprintf(text,size,"%.*s",length,line);
+    if (!ft_parse(line,length,&code,&status)) {
+        // A summary or error line from the worker: shown as is, nothing to open.
+        char text[160];
+        snprintf(text,sizeof text,"%.*s",length,line);
+        if (length>0) ft_shorten(text,FT_ROW_CHARS,row.summary,sizeof row.summary);
         return;
     }
+    row.code=true;
     const char* description=dme_description(code,n55);
     if (!description) description="Description unavailable";
-    snprintf(text,size,"%06X   %s",code,(status & 1u) ? "Active" : (status & 4u) ? "Pending" : "Stored");
-    snprintf(detail,detail_size,"%s",description);
+    char text[160];
+    snprintf(row.button,sizeof row.button,"%06X",code);
+    snprintf(text,sizeof text,"%s \267 %s",ft_status_word(status),description);
+    ft_shorten(text,FT_ROW_CHARS,row.summary,sizeof row.summary);
+    snprintf(row.lines[0],sizeof row.lines[0],"%06X  \267  %s",code,ft_status_word(status));
+    ft_wrap(description,FT_LINE_CHARS,row.lines[1],sizeof row.lines[1],row.lines[2],sizeof row.lines[2]);
+    ft_status_detail(status,row.lines[3],sizeof row.lines[3]);
 }
 }
 
@@ -121,11 +135,17 @@ public:
         if (codes_fd_<0 && code_size_) { ++code_page_; renderCodes(); }
         return true;
     }
+    void showRow(unsigned i, const CodeRow& row) {
+        updateModel(81u+i,bmw::BasicString<char>(row.button));
+        updateModel(91u+i,bmw::BasicString<char>(row.summary));
+        for (unsigned k=0;k<4;++k) updateModel(60u+4*i+k,bmw::BasicString<char>(row.lines[k]));
+        bmw::Parcel visible(row.code);   // only a row with a code can be selected
+        setProperty(321u+i,3u,visible);
+    }
     void clearRows() {
-        for (unsigned i=0;i<kCodePageSize;++i) {
-            updateModel(81u+i,bmw::BasicString<char>(""));
-            updateModel(91u+i,bmw::BasicString<char>(""));
-        }
+        CodeRow empty;
+        memset(&empty,0,sizeof empty);
+        for (unsigned i=0;i<kCodePageSize;++i) showRow(i,empty);
     }
 };
 
@@ -194,10 +214,9 @@ void EngineCodes::renderCodes() {
     for (unsigned i=0;i<kCodePageSize;++i) {
         const char *end=strchr(line,'\n');
         int length=end ? static_cast<int>(end-line) : static_cast<int>(strlen(line));
-        char detail[160];
-        format_code_line(text,sizeof text,line,length,detail,sizeof detail,n55_);
-        updateModel(81u+i,bmw::BasicString<char>(text));
-        updateModel(91u+i,bmw::BasicString<char>(detail));
+        CodeRow row;
+        format_code_row(line,length,n55_,row);
+        showRow(i,row);
         line=end ? end+1 : "";
     }
 }

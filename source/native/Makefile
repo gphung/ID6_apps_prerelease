@@ -46,9 +46,10 @@ build/test-most: tests/test_most.c $(MOST) $(FAKE_DSI) $(MOST_HEADERS) | build
 build/test-diag-link: tests/test_diag_link.c $(CORE_LINK) $(MOST) tests/fake_most_env.c $(FAKE_DSI) $(HEADERS) $(MOST_HEADERS) | build
 	$(HOST_LINK) $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway build/test-fault-text
 	./build/test-core
 	./build/test-dme-lookup
+	./build/test-fault-text
 	./build/test-diagnostic-gateway
 	./build/test-most
 	./build/test-diag-link
@@ -61,3 +62,6 @@ build/test-dme-lookup: tests/test_dme_lookup.c src/dme_lookup.h src/dme_descript
 
 build/test-diagnostic-gateway: tests/test_diagnostic_gateway.cpp src/diagnostic_gateway.h | build
 	$(CXX) -O2 -Wall -Wextra -Werror -Isrc tests/test_diagnostic_gateway.cpp -o $@
+
+build/test-fault-text: tests/test_fault_text.c src/fault_text.h | build
+	$(CC) $(CFLAGS) -Isrc tests/test_fault_text.c -o $@

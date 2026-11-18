@@ -385,7 +385,7 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(len(oil), 40)                    # every scan
         self.assertLess(len(rail), len(oil) / 2)
         gaps = [b - a for a, b in zip(rail[1:], rail[2:])]  # the first two are the initial scan
-        self.assertTrue(gaps and all(450 < g < 700 for g in gaps), gaps)
+        self.assertTrue(gaps and all(400 <= g <= 700 for g in gaps), gaps)  # 500 ms on 150 ms host ticks
 
     def test_gateway_list_tries_each_address_in_order(self):
         p, requests, _ = self.run_collector(host="127.0.0.2,not-an-ip,127.0.0.1")

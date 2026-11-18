@@ -69,14 +69,28 @@ class TransportTest(unittest.TestCase):
                         requests.append(req)
                         self.assertEqual(req[0], 0xF4)
                         obd = req[2] == 0x01
-                        self.assertEqual(length, 4 if obd else 5)
+                        pair = req[2] == 0x22 and length == 7
+                        self.assertEqual(length, 4 if obd else 7 if pair else 5)
                         self.assertIn(req[2], (0x01, 0x22))  # read only
-                        ecu, did = req[1], int.from_bytes(req[3:], "big")
+                        ecu, did = req[1], int.from_bytes(req[3:5], "big")
+                        if pair:
+                            self.assertTrue(mode.startswith("n55"))
+                            conn.sendall(frame(2, req))  # ack
+                            if mode == "n55-nopair":
+                                result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
+                            else:
+                                second = int.from_bytes(req[5:7], "big")
+                                result = (bytes([ecu, 0xF4, 0x62]) + req[3:5] + N55_VALUES[did]
+                                          + req[5:7] + N55_VALUES[second])
+                            raw = frame(1, result)
+                            for part in (raw[:2], raw[2:7], raw[7:]):
+                                conn.sendall(part)
+                            continue
                         if obd:
-                            self.assertEqual(mode, "n55")
+                            self.assertTrue(mode.startswith("n55"))
                         self.assertEqual(ecu, 0x18 if did == 0xDA12 else 0x12)
                         if did in (0x4408, 0x58EF):
-                            self.assertEqual(mode, "n55")
+                            self.assertTrue(mode.startswith("n55"))
                         if mode == "timeout":
                             time.sleep(.8)
                             return
@@ -95,7 +109,7 @@ class TransportTest(unittest.TestCase):
                         # Wrong source with a valid-looking payload must be ignored.
                         conn.sendall(frame(1, bytes([0x99, 0xF4, req[2] + 0x40]) + req[3:] + b"\0\0"))
                         conn.sendall(frame(1, bytes([ecu, 0xF4, 0x7F, req[2], 0x78])))
-                        if mode == "n55":
+                        if mode.startswith("n55"):
                             result = bytes([ecu, 0xF4, req[2] + 0x40]) + req[3:] + N55_VALUES[did]
                         elif mode == "no_trans" and did == 0xDA12:
                             result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
@@ -358,9 +372,35 @@ class TransportTest(unittest.TestCase):
                 _, err = proc.communicate()
         self.assertIn("FAKE-MOST exit unregister_target=1 unregister_client=1 free=1", err)
 
+    def check_n55_values(self, p):
+        # Everything but AFR (engine-off FFFF) is valid.
+        self.assertEqual(int(p[3]), 0b11111101)
+        self.assertAlmostEqual(float(p[5]), 0, places=1)
+        self.assertAlmostEqual(float(p[11]), 9.75)
+        self.assertAlmostEqual(float(p[13]), 8.0)                       # oil temp, signed x 0.1 C
+        self.assertAlmostEqual(float(p[15]), 30.0)                      # rail, x 0.005 bar
+        self.assertAlmostEqual(float(p[17]), 1.047 - 25902/256/100, places=5)  # oil, minus ambient
+        self.assertAlmostEqual(float(p[19]), 8)
+
+    def test_n55_profile_pairs_boost_with_afr_and_timing_with_oil_pressure(self):
+        p, requests, trace = self.run_collector("n55", ("--profile", "n55", "--trace"))
+        self.assertEqual(len(requests), 7)   # 9 values, two of them paired
+        self.assertIn(bytes.fromhex("f4122242055889"), requests)
+        self.assertIn(bytes.fromhex("f412224a49586f"), requests)
+        self.assertIn("did=586F payload=0417 pair=4A49+586F decoded=1.047000", trace)
+        self.check_n55_values(p)
+
+    def test_n55_refused_pairs_fall_back_to_single_reads(self):
+        p, requests, _ = self.run_collector("n55-nopair", ("--profile", "n55"), cycles=2)
+        pairs = [r for r in requests if len(r) == 7]
+        self.assertEqual(len(pairs), 1)      # refused once, never asked again
+        for single in ("f412224205", "f412225889", "f412224a49", "f41222586f"):
+            self.assertIn(bytes.fromhex(single), requests)
+        self.check_n55_values(p)
+
     def test_n55_profile_reads_its_own_dids_and_no_egs(self):
         p, requests, trace = self.run_collector("n55", ("--profile", "n55", "--trace"))
-        self.assertEqual(len(requests), 9)
+        self.assertEqual(len(requests), 7)
         self.assertTrue(all(r[1] == 0x12 for r in requests))  # never the EGS
         for wanted in ("f4120105", "f412224408", "f4122258ef"):
             self.assertIn(bytes.fromhex(wanted), requests)

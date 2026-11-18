@@ -77,6 +77,34 @@ class DriveAppsTest(unittest.TestCase):
             self.assertEqual((rpm,kph), (6250,100))
 
 
+    def test_n55_shift_worker_reads_rpm_and_speed_in_one_request(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.settimeout(2)
+            # 4807 = 0x61A8 / 4 = 6250 rpm, 4AB1 = 0x3200 / 128 = 100 km/h
+            self.run_worker("shift-deck", ["--profile", "n55", "--cycles", "1", "--udp-port", str(listener.getsockname()[1])],
+                            [("22480 74ab1".replace(" ", ""), ["62480761a84ab13200"])])
+            _, rpm, kph = struct.unpack("=Qii", listener.recv(64))
+            self.assertEqual((rpm, kph), (6250, 100))
+
+    def test_n55_shift_worker_falls_back_to_obd_when_the_pair_is_refused(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.settimeout(2)
+            self.run_worker("shift-deck", ["--profile", "n55", "--cycles", "1", "--udp-port", str(listener.getsockname()[1])],
+                            [("224807" "4ab1", ["7f2231"]), ("010c", ["410c61a8"]), ("010d", ["410d64"])])
+            _, rpm, kph = struct.unpack("=Qii", listener.recv(64))
+            self.assertEqual((rpm, kph), (6250, 100))
+
+    def test_n55_shift_worker_rejects_a_pair_reply_with_the_wrong_second_did(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.settimeout(2)
+            self.run_worker("shift-deck", ["--profile", "n55", "--cycles", "1", "--udp-port", str(listener.getsockname()[1])],
+                            [("224807" "4ab1", ["62480761a84ab23200"])])
+            _, rpm, kph = struct.unpack("=Qii", listener.recv(64))
+            self.assertEqual((rpm, kph), (-1, -1))
+
     def test_shift_worker_waits_for_a_busy_gateway(self):
         with socket.socket() as gateway, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as lock:
             gateway.bind(("127.0.0.1", 0))

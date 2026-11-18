@@ -266,6 +266,23 @@ int main(int argc, char **argv) {
 }
 #elif defined(SHIFT_DECK_ONLY)
 #include "drive_frame.h"
+#include "did_pair.h"
+
+/* N55: RPM (4807, x 0.25) and speed (4AB1, x 1/128 km/h) in one request. Returns 0 read, -1 link lost,
+ * -3 skip this frame, -2 refused (use the OBD PIDs instead). */
+static int read_rpm_speed(struct diag_link *link, int *rpm, int *kph) {
+    unsigned char reply[32];
+    const unsigned char *a, *b;
+    int rc = read_did_pair(link, 0x12, 0x4807, 2, 0x4ab1, 2, reply, sizeof reply, &a, &b);
+    *rpm = *kph = -1;
+    if (rc == -1 || rc == -3 || rc == -2) return rc;
+    if (rc == 1) {
+        unsigned r = ((unsigned)a[0] << 8) | a[1], v = ((unsigned)b[0] << 8) | b[1];
+        if (r / 4 <= 16383) *rpm = (int)(r / 4);
+        if ((v + 64) / 128 <= 255) *kph = (int)((v + 64) / 128);
+    }
+    return 0;
+}
 
 /* The raw PID value, -1 when the ECU refused it. Returns 0 read, -1 link lost, -3 skip this frame. */
 static int read_live_pid(struct diag_link *link, unsigned char pid, int width, int *value) {
@@ -284,7 +301,7 @@ int main(int argc, char **argv) {
     unsigned udp_port=DRIVE_PORT, cycles=0, count=0;
     pid_t parent=getppid();
     struct sockaddr_in dest;
-    int sock, i, lost;
+    int sock, i, lost, n55=0, paired=1;
 #ifdef NATIVE_FAST
     uint64_t speed_due=0;
     int last_speed=-1;
@@ -297,6 +314,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--transport") && i+1<argc && !strcmp(argv[i+1],"auto")) ++i;
         else if (!strcmp(argv[i],"--transport") && i+1<argc && !strcmp(argv[i+1],"hsfz")) { cfg.transport=DIAG_HSFZ; ++i; }
         else if (!strcmp(argv[i],"--transport") && i+1<argc && !strcmp(argv[i+1],"most")) { cfg.transport=DIAG_MOST; ++i; }
+        else if (!strcmp(argv[i],"--profile") && i+1<argc && !strcmp(argv[i+1],"n55")) { n55=1; ++i; }
         else return 2;
     }
     if ((!cfg.host && cfg.transport==DIAG_HSFZ) || parent<=1) return 2;
@@ -313,7 +331,11 @@ int main(int argc, char **argv) {
         int rpm=-1,kph=-1,rc;
         uint64_t start=bd_mono_ms(), elapsed;
         int up=diag_link_up(&link);
-        if (up) {
+        if (up && n55 && paired) {
+            rc=read_rpm_speed(&link,&rpm,&kph);
+            if (rc==-2) paired=0;       /* refused: the OBD PIDs from now on */
+        }
+        if (up && !(n55 && paired)) {
             rc=read_live_pid(&link,0x0c,2,&rpm);
 #ifdef NATIVE_FAST
             if (!rc && start>=speed_due) {
@@ -324,6 +346,8 @@ int main(int argc, char **argv) {
 #else
             if (!rc) rc=read_live_pid(&link,0x0d,1,&kph);
 #endif
+        }
+        if (up) {
             if (rc==-1) diag_link_drop(&link);
             else if (!rc) {
                 f.sampled_ms=bd_mono_ms();
@@ -350,6 +374,7 @@ int main(int argc, char **argv) {
 #else
 #include "most/dsi_client.h"
 #include "most/most_link.h"
+#include "did_pair.h"
 
 static int trace_reads = 0;
 static int profile_n55 = 0; /* --profile n55: bd_decode_n55 */
@@ -386,6 +411,30 @@ static int read_did(struct diag_link *link, unsigned ecu, unsigned did, double *
     if (n==-3) return -3;
     if (n<0) return -1;
     return decode_reply(ecu,did,reply,n,value);
+}
+
+/* N55: two DIDs in one request. Returns read_did's codes for d1 (or -2 when the pair is refused) and
+ * stores d2's decode result (1 or 0) in *rc2. Both are two-byte N55 values. */
+static int read_pair_values(struct diag_link *link, unsigned d1, unsigned d2, double *v1, int *rc2, double *v2) {
+    unsigned char reply[32];
+    const unsigned char *a, *b;
+    unsigned k;
+    int rc = read_did_pair(link, 0x12, d1, 2, d2, 2, reply, sizeof reply, &a, &b), r1;
+    *rc2 = 0;
+    if (rc == -2 || rc == -1 || rc == -3) return rc;
+    if (rc != 1) return 0;
+    r1 = bd_decode_n55(d1, a, 2, v1);
+    *rc2 = bd_decode_n55(d2, b, 2, v2);
+    for (k = 0; trace_reads && k < 2; ++k) {
+        const unsigned did = k ? d2 : d1;
+        const unsigned char *x = k ? b : a;
+        const int ok = k ? *rc2 : r1;
+        fprintf(stderr, "RAW mono_ms=%llu ecu=12 did=%04X payload=%02X%02X pair=%04X+%04X", (unsigned long long)bd_mono_ms(),
+                did, x[0], x[1], d1, d2);
+        if (ok) fprintf(stderr, " decoded=%.6f\n", k ? *v2 : *v1);
+        else fputs(" unavailable reason=invalid-or-out-of-range\n", stderr);
+    }
+    return r1;
 }
 
 /* OBD mode 01 read for profiles where the BMW DID is not usable. Same return codes as read_did. */
@@ -452,6 +501,10 @@ int main(int argc, char **argv) {
     const unsigned first_delay[] = {900,0,0,0,500,1150,0,0,1700};
     uint64_t due[sizeof dids/sizeof dids[0]] = {0};
     uint64_t failed_until[sizeof dids/sizeof dids[0]] = {0};
+    /* N55 pairs: boost (4205) with AFR (5889), timing (4A49) with oil pressure (586F). The partner's
+     * value waits here until the loop reaches it, so it is handled exactly like a single read. */
+    int paired = 0, pending[sizeof dids/sizeof dids[0]] = {0}, pending_rc[sizeof dids/sizeof dids[0]] = {0};
+    double pending_v[sizeof dids/sizeof dids[0]] = {0};
 #ifdef PERF_LAB
     int ethanol=0;
     uint64_t next_ethanol=0;
@@ -470,7 +523,7 @@ int main(int argc, char **argv) {
          * Captured 2026-11-16. */
         else if (!strcmp(argv[i], "--profile") && i+1 < (unsigned)argc &&
                  (!strcmp(argv[i+1], "n55") || !strcmp(argv[i+1], "reference"))) {
-            n55 = profile_n55 = !strcmp(argv[++i], "n55");
+            n55 = profile_n55 = paired = !strcmp(argv[++i], "n55");
         }
         else if (!strcmp(argv[i], "--host") && i+1 < (unsigned)argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < (unsigned)argc) port = number(argv[++i],1,65535);
@@ -519,6 +572,7 @@ int main(int argc, char **argv) {
             diag_link_tick(&link);
             up = diag_link_up(&link);
             if (diag_link_on_most(&link) && !n55) f.valid &= ~(1u << BD_TRANS); /* no EGS reads on MOST */
+            memset(pending, 0, sizeof pending);   /* a partner value never outlives its scan */
             for (i=0; up && i < sizeof dids / sizeof dids[0] && diag_running; ++i) {
                 double v = 0;
                 int rc;
@@ -536,7 +590,16 @@ int main(int argc, char **argv) {
                 }
                 kept = i != 0 ? f.valid & (1u << (i-1)) : 0;
                 f.valid &= ~kept;
-                if (n55 && dids[i] == 0x4300) rc = read_obd(&link, 0x05, &v);
+                if (pending[i]) { rc = pending_rc[i]; v = pending_v[i]; pending[i] = 0; }
+                else if (paired && (dids[i] == 0x4205 || dids[i] == 0x4a49)) {
+                    const unsigned j = dids[i] == 0x4205 ? 2u : 7u;   /* 5889 and 586F */
+                    int rc2;
+                    double v2 = 0;
+                    rc = read_pair_values(&link, dids[i], dids[j], &v, &rc2, &v2);
+                    if (rc == -2) { paired = 0; rc = read_did(&link, 0x12, dids[i], &v); }  /* refused: singles */
+                    else if (rc >= 0) { pending[j] = 1; pending_rc[j] = rc2; pending_v[j] = v2; }
+                }
+                else if (n55 && dids[i] == 0x4300) rc = read_obd(&link, 0x05, &v);
                 else if (n55 && dids[i] == 0xda12) rc = read_did(&link, 0x12, 0x4408, &v); /* oil temp */
                 else if (n55 && dids[i] == 0x56d7) rc = read_did(&link, 0x12, 0x58ef, &v); /* rail */
                 else rc = read_did(&link, dids[i] == 0xda12 ? 0x18 : 0x12, dids[i], &v);

@@ -328,7 +328,7 @@ int main(int argc, char **argv) {
     inet_pton(AF_INET,"127.0.0.1",&dest.sin_addr);
     while (diag_running && getppid()==parent && (!cycles || count<cycles) && !diag_link_lost(&link)) {
         struct drive_frame f;
-        int rpm=-1,kph=-1,rc;
+        int rpm=-1,kph=-1,rc=-3;
         uint64_t start=bd_mono_ms(), elapsed;
         int up=diag_link_up(&link);
         if (up && n55 && paired) {

@@ -481,12 +481,15 @@ void BoostDeck::startVisibleCollector() {
     if (n55) {
         // Each tile's metric once, oil temperature for ENGINE, and RPM for the battery warnings.
         int wanted[NM_MAX_FRAME];
-        const unsigned count=nm_wanted(tiles_,wanted);
+        unsigned rates[NM_MAX_FRAME];
+        const unsigned count=nm_wanted(tiles_,wanted,rates);
         size_t used=0;
         metric_list_[0]=0;
         for (unsigned i=0;i<count;++i) {
-            const int n=snprintf(metric_list_+used,sizeof metric_list_-used,"%s%s",i ? "," : "",
-                                 nm_metrics[wanted[i]].key);
+            char rate[12]="";
+            if (rates[i]) snprintf(rate,sizeof rate,"@%u",rates[i]);
+            const int n=snprintf(metric_list_+used,sizeof metric_list_-used,"%s%s%s",i ? "," : "",
+                                 nm_metrics[wanted[i]].key,rate);
             if (n<0 || static_cast<size_t>(n)>=sizeof metric_list_-used) return;
             used+=static_cast<size_t>(n);
         }

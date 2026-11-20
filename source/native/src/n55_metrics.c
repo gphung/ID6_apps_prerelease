@@ -205,7 +205,7 @@ static unsigned add_unique(int *list, unsigned count, int metric) {
     return count + 1;
 }
 
-unsigned nm_wanted(const int tiles[NM_TILES], int wanted[NM_MAX_FRAME]) {
+unsigned nm_wanted(const int tiles[NM_TILES], int wanted[NM_MAX_FRAME], unsigned rates[NM_MAX_FRAME]) {
     unsigned i, count = 0;
     int battery = 0;
     for (i = 0; i < NM_TILES; ++i) {
@@ -214,8 +214,13 @@ unsigned nm_wanted(const int tiles[NM_TILES], int wanted[NM_MAX_FRAME]) {
         count = add_unique(wanted, count, m);
         if (nm_metrics[m].rule == NR_BATTERY_V || nm_metrics[m].rule == NR_BATTERY_A) battery = 1;
     }
+    for (i = 0; i < count; ++i) rates[i] = 0;
     count = add_unique(wanted, count, NM_OIL_TEMP);
-    if (battery) count = add_unique(wanted, count, NM_RPM);
+    if (count && wanted[count - 1] == NM_OIL_TEMP) rates[count - 1] = 0;
+    if (battery && add_unique(wanted, count, NM_RPM) > count) {
+        rates[count] = NM_HELPER_MS;      /* only whether the engine runs: once a second is enough */
+        ++count;
+    }
     return count;
 }
 
@@ -236,7 +241,7 @@ static unsigned add_source(nm_source *out, unsigned count, unsigned did, unsigne
     return count + 1;
 }
 
-unsigned nm_sources(const int *wanted, unsigned count, nm_source out[NM_MAX_SOURCES]) {
+unsigned nm_sources(const int *wanted, const unsigned *rates, unsigned count, nm_source out[NM_MAX_SOURCES]) {
     unsigned i, n = 0;
     int ambient = 0, wastegate = 0;
     for (i = 0; i < count; ++i) {
@@ -254,7 +259,8 @@ unsigned nm_sources(const int *wanted, unsigned count, nm_source out[NM_MAX_SOUR
         const nm_metric *m;
         if (wanted[i] < 0 || wanted[i] >= NM_COUNT) continue;
         m = &nm_metrics[wanted[i]];
-        n = add_source(out, n, m->did, m->offset ? 0 : m->size, m->flags & NF_OBD, m->rate_ms);
+        n = add_source(out, n, m->did, m->offset ? 0 : m->size, m->flags & NF_OBD,
+                       rates && rates[i] > m->rate_ms ? rates[i] : m->rate_ms);
     }
     return n;
 }

@@ -95,10 +95,13 @@ static void test_tiles(void) {
 static void test_sources(void) {
     int tiles[NM_TILES] = {NM_TIMING, NM_TIMING1, NM_BOOST, NM_BATTERY, NM_WASTEGATE, NM_BLANK, NM_OIL_PRESS, NM_KNOCK};
     int wanted[NM_MAX_FRAME];
+    unsigned rates[NM_MAX_FRAME];
     nm_source s[NM_MAX_SOURCES];
-    unsigned n = nm_wanted(tiles, wanted), k, i, timing = 0, ambient = 0;
+    unsigned n = nm_wanted(tiles, wanted, rates), k, i, timing = 0, ambient = 0;
     assert(n == 9);                                          /* 7 tiles + oil temperature + RPM */
-    k = nm_sources(wanted, n, s);
+    assert(wanted[8] == NM_RPM && rates[8] == NM_HELPER_MS && rates[0] == 0 && rates[7] == 0);
+    k = nm_sources(wanted, rates, n, s);
+    for (i = 0; i < k; ++i) if (s[i].did == 0x4807) assert(s[i].rate_ms == NM_HELPER_MS);
     for (i = 0; i < k; ++i) {
         if (s[i].did == 0x4A49) ++timing;
         if (s[i].did == NM_AMBIENT_DID) { ++ambient; assert(s[i].rate_ms == NM_AMBIENT_MS); }
@@ -107,8 +110,13 @@ static void test_sources(void) {
     assert(k == 11);                                         /* 8 DIDs + ambient + two end stops */
     {
         int all[NM_TILES] = {NM_TIMING1, NM_TIMING2, NM_TIMING3, NM_TIMING4, NM_TIMING5, NM_TIMING6, NM_THROTTLE, NM_KNOCK};
-        n = nm_wanted(all, wanted);
-        assert(nm_sources(wanted, n, s) == 9);
+        int rpm_tile[NM_TILES] = {NM_BATTERY, NM_RPM, NM_BLANK, NM_BLANK, NM_BLANK, NM_BLANK, NM_BLANK, NM_BLANK};
+        n = nm_wanted(all, wanted, rates);
+        assert(nm_sources(wanted, rates, n, s) == 9);
+        n = nm_wanted(rpm_tile, wanted, rates);              /* an RPM tile keeps every scan */
+        assert(n == 3 && rates[1] == 0);
+        k = nm_sources(wanted, rates, n, s);
+        for (i = 0; i < k; ++i) if (s[i].did == 0x4807) assert(s[i].rate_ms == 0);
     }
 }
 

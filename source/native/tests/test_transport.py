@@ -500,6 +500,31 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(sum(len(r) == 7 for r in requests), 1)
         self.assertEqual(len(values), 4)
 
+    def test_metrics_pair_around_an_obd_read(self):
+        # Coolant is an OBD read and cannot be paired: knock still pairs with throttle past it.
+        _, requests, _ = self.run_metrics(("knock", "coolant", "throttle", "iat", "oil_temp"))
+        self.assertEqual(len(requests), 3)
+        self.assertIn(bytes.fromhex("f412224a36480b"), requests)
+
+    def test_metrics_rpm_for_the_battery_tile_once_a_second(self):
+        keys = ("oil_temp", "oil_pressure", "coolant", "knock", "boost", "iat", "battery", "rpm@1000")
+        values, _, trace = self.run_metrics(keys, cycles=6, extra=("--trace",))
+        self.assertEqual(len(re.findall(r"did=4807 ", trace)), 1)
+        self.assertEqual(len(re.findall(r"did=4A36 ", trace)), 6)
+        self.assertIn(self.METRIC["rpm"], values)
+        for bad in ("rpm@", "rpm@x", "rpm@99999", "rpm@-1"):
+            result = subprocess.run([BIN, "--demo", "--metrics", bad, "--cycles", "1"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, bad)
+
+    def test_metrics_slow_reads_are_spread_out(self):
+        keys = ("oil_temp", "oil_pressure", "coolant", "knock", "boost", "iat", "battery", "rpm@1000")
+        _, _, trace = self.run_metrics(keys, cycles=30, extra=("--trace",))
+        scans = [int(t) for t in re.findall(r"RAW mono_ms=(\d+) ecu=12 did=4A36 ", trace)]
+        slow = [int(t) for t in re.findall(r"RAW mono_ms=(\d+) ecu=12 (?:did=(?:4201|5853|4807|4408|580F)|pid=05) ", trace)]
+        later = [t for t in slow if t > scans[1]]            # after the first scan reads everything
+        per_scan = [sum(a <= t < b for t in later) for a, b in zip(scans[1:], scans[2:])]
+        self.assertLessEqual(max(per_scan), 3, per_scan)    # never all six at once
+
     def test_metrics_rejects_bad_lists(self):
         for bad in ("boost,boost", "nope", ""):
             result = subprocess.run([BIN, "--demo", "--metrics", bad, "--cycles", "1"], capture_output=True, text=True)

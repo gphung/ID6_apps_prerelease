@@ -76,14 +76,16 @@ int nm_format_tiles(const int tiles[NM_TILES], char *out, size_t size);
 void nm_assign(int tiles[NM_TILES], unsigned position, int metric);
 
 /* The metrics the collector delivers: each tile's metric once, oil temperature for the ENGINE
- * panel, and RPM when a battery tile needs to know whether the engine runs. Returns the count. */
-unsigned nm_wanted(const int tiles[NM_TILES], int wanted[NM_MAX_FRAME]);
+ * panel, and RPM when a battery tile needs to know whether the engine runs. rates[i] is 0 for the
+ * metric's own rate, or slower: RPM read only for a battery tile needs NM_HELPER_MS. */
+enum { NM_HELPER_MS = 1000 };
+unsigned nm_wanted(const int tiles[NM_TILES], int wanted[NM_MAX_FRAME], unsigned rates[NM_MAX_FRAME]);
 
 /* Read sources: one per distinct DID (or OBD PID), at the fastest rate any wanted metric needs,
  * plus ambient pressure and the wastegate end stops when needed. */
 typedef struct { unsigned did; unsigned char size, flags; unsigned short rate_ms; } nm_source;
 enum { NM_MAX_SOURCES = NM_MAX_FRAME + 3 };
-unsigned nm_sources(const int *wanted, unsigned count, nm_source out[NM_MAX_SOURCES]);
+unsigned nm_sources(const int *wanted, const unsigned *rates, unsigned count, nm_source out[NM_MAX_SOURCES]);
 
 /* Knock events and misfire totals, from each sample in order. */
 typedef struct { double last[NM_COUNT], carried[NM_COUNT]; int seen[NM_COUNT]; unsigned knocks; } nm_tracker;

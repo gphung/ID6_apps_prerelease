@@ -376,6 +376,7 @@ int main(int argc, char **argv) {
 #include "most/most_link.h"
 #include "did_pair.h"
 #include "n55_metrics.h"
+#include <ctype.h>
 
 static int trace_reads = 0;
 static int profile_n55 = 0; /* --profile n55: bd_decode_n55 */
@@ -465,6 +466,7 @@ static int read_obd(struct diag_link *link, unsigned char pid, double *value) {
  * due time, two per request where the DME allows it, and every value goes out as an NBN1 frame. */
 typedef struct {
     int wanted[NM_MAX_FRAME];
+    unsigned rates[NM_MAX_FRAME];
     unsigned count, nsources;
     nm_source source[NM_MAX_SOURCES];
     uint64_t due[NM_MAX_SOURCES], skip_until[NM_MAX_SOURCES];
@@ -480,19 +482,34 @@ typedef struct {
 static int parse_metrics(const char *list, metrics_run *r) {
     const char *p = list;
     memset(r, 0, sizeof *r);
+    /* key or key@ms (a slower rate than the metric's own), separated by commas */
     while (*p) {
         const char *end = strchr(p, ',');
         const size_t n = end ? (size_t)(end - p) : strlen(p);
-        const int id = nm_find(p, n);
-        unsigned i;
+        const char *at = memchr(p, '@', n);
+        const int id = nm_find(p, at ? (size_t)(at - p) : n);
+        unsigned i, rate = 0;
         if (id < 0 || r->count == NM_MAX_FRAME) return 0;
+        if (at) {
+            char digits[8];
+            char *stop;
+            unsigned long ms;
+            const size_t k = n - (size_t)(at - p) - 1;
+            if (!k || k >= sizeof digits) return 0;
+            memcpy(digits, at + 1, k);
+            digits[k] = 0;
+            ms = strtoul(digits, &stop, 10);
+            if (*stop || !isdigit((unsigned char)digits[0]) || ms > 60000) return 0;
+            rate = (unsigned)ms;
+        }
         for (i = 0; i < r->count; ++i) if (r->wanted[i] == id) return 0;
+        r->rates[r->count] = rate;
         r->wanted[r->count++] = id;
         if (!end) break;
         p = end + 1;
     }
     if (!r->count) return 0;
-    r->nsources = nm_sources(r->wanted, r->count, r->source);
+    r->nsources = nm_sources(r->wanted, r->rates, r->count, r->source);
     r->paired = 1;
     nm_tracker_init(&r->tracker);
     return 1;
@@ -648,15 +665,36 @@ static int run_metrics(struct diag_link *link, int sock, struct sockaddr_in *des
             for (i = 0; up && i < r->nsources; ++i) {
                 if (start < r->skip_until[i] || start < r->due[i]) continue;
                 due[ndue++] = i;
-                r->due[i] = r->source[i].rate_ms ? start + r->source[i].rate_ms : 0;
+                /* After the first read, slow sources are spread across their period, so their reads do
+                 * not all land in one scan and lengthen it. */
+                r->due[i] = !r->source[i].rate_ms ? 0
+                          : start + r->source[i].rate_ms +
+                            (r->due[i] ? 0 : (i * 97u) % (r->source[i].rate_ms / 2u + 1u));
             }
-            for (i = 0; i < ndue && diag_running; ) {
+            /* Pair any two pairable sources due now, in order, so one that cannot be paired (an OBD
+             * read or a block) never leaves its neighbours to go alone. */
+            int partner[NM_MAX_SOURCES], taken[NM_MAX_SOURCES];
+            memset(taken, 0, sizeof taken);
+            for (i = 0; i < ndue; ++i) {
+                unsigned j;
+                partner[i] = -1;
+                if (taken[i] || !pairable(&r->source[due[i]])) continue;
+                for (j = i + 1; j < ndue; ++j) {
+                    if (!taken[j] && pairable(&r->source[due[j]])) { partner[i] = (int)j; taken[j] = 1; break; }
+                }
+            }
+            for (i = 0; i < ndue && diag_running; ++i) {
                 const unsigned a = due[i];
                 int rc;
-                unsigned used = 1;
-                if (r->paired && i + 1 < ndue && pairable(&r->source[a]) && pairable(&r->source[due[i + 1]])) {
-                    const unsigned b = due[i + 1];
-                    used = 2;
+                if (taken[i]) continue;    /* read with its partner */
+                if (partner[i] >= 0 && !r->paired) {
+                    /* Pairs were refused earlier in this scan: both alone. */
+                    int ra = metrics_single(link, r, a), rb = ra < 0 ? ra : metrics_single(link, r, due[partner[i]]);
+                    if (ra == 0) r->skip_until[a] = bd_mono_ms() + 30000;
+                    if (rb == 0) r->skip_until[due[partner[i]]] = bd_mono_ms() + 30000;
+                    rc = ra < 0 ? ra : rb < 0 ? rb : 1;
+                } else if (partner[i] >= 0) {
+                    const unsigned b = due[partner[i]];
                     rc = metrics_pair(link, r, a, b);
                     if (rc == -2 || rc == 0) {
                         /* Refused or unexpected: each on its own. Both answering alone means the DME
@@ -683,7 +721,6 @@ static int run_metrics(struct diag_link *link, int sock, struct sockaddr_in *des
                 }
                 /* A tunnel read is slow, so each new value goes out at once. */
                 if (diag_link_on_most(link) && !metrics_send(sock, dest, r, ++seq)) diag_running = 0;
-                i += used;
             }
             if (up && link->fd >= 0) (void)diag_link_should_yield(link, bd_mono_ms());
         }

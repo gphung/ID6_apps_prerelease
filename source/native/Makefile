@@ -46,8 +46,9 @@ build/test-most: tests/test_most.c $(MOST) $(FAKE_DSI) $(MOST_HEADERS) | build
 build/test-diag-link: tests/test_diag_link.c $(CORE_LINK) $(MOST) tests/fake_most_env.c $(FAKE_DSI) $(HEADERS) $(MOST_HEADERS) | build
 	$(HOST_LINK) $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway build/test-fault-text
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway build/test-fault-text build/test-n55-metrics
 	./build/test-core
+	./build/test-n55-metrics
 	./build/test-dme-lookup
 	./build/test-fault-text
 	./build/test-diagnostic-gateway
@@ -65,3 +66,6 @@ build/test-diagnostic-gateway: tests/test_diagnostic_gateway.cpp src/diagnostic_
 
 build/test-fault-text: tests/test_fault_text.c src/fault_text.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_fault_text.c -o $@
+
+build/test-n55-metrics: tests/test_n55_metrics.c src/n55_metrics.c src/n55_metrics.h | build
+	$(CC) $(CFLAGS) -Isrc $(filter %.c,$^) -lm -o $@

@@ -26,7 +26,13 @@ N55_VALUES = {0x4201: bytes.fromhex("652e"), 0x4205: bytes.fromhex("3297"),
               0x580F: bytes.fromhex("4d"), 0x586F: bytes.fromhex("0417"),
               0x4300: bytes.fromhex("4b"), 0x05: bytes.fromhex("30"),
               0x4408: bytes.fromhex("0050"),   # oil temperature 8.0 C, not in the engine-off capture
-              0x58EF: bytes.fromhex("1770")}   # rail pressure 30 bar, not in the engine-off capture
+              0x58EF: bytes.fromhex("1770"),   # rail pressure 30 bar, not in the engine-off capture
+              # Read on the car 2026-11-19 (warm idle) for the --metrics tiles.
+              0x4A4E: bytes.fromhex("ffc0"), 0x4A36: bytes.fromhex("00"), 0x480B: bytes.fromhex("0000"),
+              0x5853: bytes.fromhex("3ab5"), 0x5852: bytes.fromhex("2308"), 0x4807: bytes.fromhex("0a2e"),
+              0x4023: bytes.fromhex("5b803a84450005000000002122222222223a3c3e3b3d39413300000086"),
+              0x4AB0: bytes.fromhex("64ac"), 0x4654: bytes.fromhex("fccd"), 0x576A: bytes.fromhex("560c"),
+              0x576B: bytes.fromhex("f976")}
 
 
 def frame(ctrl, body):
@@ -44,7 +50,7 @@ def exact(conn, n):
 
 
 class TransportTest(unittest.TestCase):
-    def run_collector(self, mode="normal", extra=(), cycles=1, env=None, host="127.0.0.1"):
+    def run_collector(self, mode="normal", extra=(), cycles=1, env=None, host="127.0.0.1", expect="NBG3"):
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.bind(("127.0.0.1", 0))
         udp.settimeout(4)
@@ -76,7 +82,8 @@ class TransportTest(unittest.TestCase):
                         if pair:
                             self.assertTrue(mode.startswith("n55"))
                             conn.sendall(frame(2, req))  # ack
-                            if mode == "n55-nopair":
+                            second = int.from_bytes(req[5:7], "big")
+                            if mode == "n55-nopair" or (mode == "n55-knock-nrc" and 0x4A36 in (did, second)):
                                 result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
                             else:
                                 second = int.from_bytes(req[5:7], "big")
@@ -109,7 +116,9 @@ class TransportTest(unittest.TestCase):
                         # Wrong source with a valid-looking payload must be ignored.
                         conn.sendall(frame(1, bytes([0x99, 0xF4, req[2] + 0x40]) + req[3:] + b"\0\0"))
                         conn.sendall(frame(1, bytes([ecu, 0xF4, 0x7F, req[2], 0x78])))
-                        if mode.startswith("n55"):
+                        if mode == "n55-knock-nrc" and did == 0x4A36:
+                            result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
+                        elif mode.startswith("n55"):
                             result = bytes([ecu, 0xF4, req[2] + 0x40]) + req[3:] + N55_VALUES[did]
                         elif mode == "no_trans" and did == 0xDA12:
                             result = bytes([ecu, 0xF4, 0x7F, 0x22, 0x31])
@@ -137,10 +146,11 @@ class TransportTest(unittest.TestCase):
                                      "--udp-port", str(udp.getsockname()[1]), "--cycles", str(cycles), *extra],
                                     capture_output=True, text=True, timeout=10, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            packets = [udp.recv(512).decode().split() for _ in range(cycles)]
+            packets = [udp.recv(1024).decode().split() for _ in range(cycles)]
             packet = packets[-1]
-            self.assertEqual(packet[0], "NBG3")
-            self.assertGreater(int(packet[4]), 0)
+            self.assertEqual(packet[0], expect)
+            if expect == "NBG3":
+                self.assertGreater(int(packet[4]), 0)
             t.join(2)
             self.assertFalse(t.is_alive())
             if errors:
@@ -426,6 +436,74 @@ class TransportTest(unittest.TestCase):
         self.assertLess(len(rail), len(oil) / 2)
         gaps = [b - a for a, b in zip(rail[1:], rail[2:])]  # the first two are the initial scan
         self.assertTrue(gaps and all(400 <= g <= 700 for g in gaps), gaps)  # 500 ms on 150 ms host ticks
+
+    def run_metrics(self, keys, mode="n55", cycles=1, extra=()):
+        p, requests, trace = self.run_collector(mode, ("--metrics", ",".join(keys), *extra), cycles=cycles,
+                                                expect="NBN1")
+        count = int(p[3])
+        values = {}
+        for k in range(count):
+            metric, value, aux, age = p[4 + 4 * k: 8 + 4 * k]
+            values[int(metric)] = (float(value), float(aux), int(age))
+        return values, requests, trace
+
+    METRIC = {"boost": 0, "timing": 6, "timing1": 7, "timing2": 8, "knock": 13, "oil_temp": 21,
+              "wastegate": 27, "rpm": 31, "battery": 33, "battery_amps": 34, "battery_pct": 35}
+
+    def test_metrics_read_each_did_once_two_per_request(self):
+        keys = ("timing", "timing1", "timing2", "knock", "battery", "battery_amps", "battery_pct", "oil_temp", "rpm")
+        values, requests, trace = self.run_metrics(keys, extra=("--trace",))
+        dids = []
+        for r in requests:
+            dids += [r[3:5].hex()] + ([r[5:7].hex()] if len(r) == 7 else [])
+        self.assertEqual(sorted(dids), sorted(set(dids)))       # nothing read twice
+        self.assertEqual(dids.count("4a49"), 1)                 # Timing and Timing 1 share it
+        self.assertEqual(len(requests), 5)                      # 4 pairs and the 4023 block alone
+        m = self.METRIC
+        self.assertAlmostEqual(values[m["timing"]][0], 0)
+        self.assertEqual(values[m["timing"]][0], values[m["timing1"]][0])
+        self.assertAlmostEqual(values[m["timing2"]][0], -6.4)
+        self.assertAlmostEqual(values[m["battery"]][0], 15.029)
+        self.assertAlmostEqual(values[m["battery_amps"]][0], 20.64)  # charging shown positive
+        self.assertAlmostEqual(values[m["battery_pct"]][0], 58)
+        self.assertAlmostEqual(values[m["rpm"]][0], 651.5)
+        self.assertEqual(values[m["knock"]][:2], (0, 0))
+        self.assertIn("did=4A49 payload=0000 pair=", trace)
+
+    def test_metrics_boost_and_wastegate_need_their_helpers(self):
+        values, requests, _ = self.run_metrics(("boost", "wastegate", "oil_temp"))
+        dids = set()
+        for r in requests:
+            dids |= {r[3:5].hex()} | ({r[5:7].hex()} if len(r) == 7 else set())
+        self.assertTrue({"4201", "576a", "576b"} <= dids)
+        m = self.METRIC
+        self.assertAlmostEqual(values[m["boost"]][0], (0x3297 * 0.078125 - 0x652e * 0.0390625) / 1000, places=4)
+        self.assertAlmostEqual(values[m["wastegate"]][0], 3.6, places=1)
+
+    def test_metrics_slow_values_wait_for_their_rate(self):
+        _, _, trace = self.run_metrics(("boost", "battery_pct", "oil_temp"), cycles=6, extra=("--trace",))
+        self.assertEqual(len(re.findall(r"did=4023 ", trace)), 1)   # every 10 s
+        self.assertEqual(len(re.findall(r"did=4205 ", trace)), 6)   # every scan
+
+    def test_metrics_one_refused_did_keeps_pairs(self):
+        values, requests, trace = self.run_metrics(("knock", "timing", "rpm", "oil_temp"), mode="n55-knock-nrc",
+                                                   cycles=3)
+        self.assertNotIn(self.METRIC["knock"], values)
+        self.assertIn(self.METRIC["timing"], values)
+        self.assertIn("DID 4A36 NRC 31", trace)
+        later = requests[3:]
+        self.assertTrue(any(len(r) == 7 for r in later))        # still pairing
+        self.assertNotIn(bytes.fromhex("f412224a36"), later)      # and not asking for knock again
+
+    def test_metrics_refused_pairs_fall_back_to_single_reads(self):
+        values, requests, _ = self.run_metrics(("timing", "rpm", "knock", "oil_temp"), mode="n55-nopair", cycles=2)
+        self.assertEqual(sum(len(r) == 7 for r in requests), 1)
+        self.assertEqual(len(values), 4)
+
+    def test_metrics_rejects_bad_lists(self):
+        for bad in ("boost,boost", "nope", ""):
+            result = subprocess.run([BIN, "--demo", "--metrics", bad, "--cycles", "1"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, bad)
 
     def test_gateway_list_tries_each_address_in_order(self):
         p, requests, _ = self.run_collector(host="127.0.0.2,not-an-ip,127.0.0.1")

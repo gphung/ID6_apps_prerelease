@@ -375,6 +375,7 @@ int main(int argc, char **argv) {
 #include "most/dsi_client.h"
 #include "most/most_link.h"
 #include "did_pair.h"
+#include "n55_metrics.h"
 
 static int trace_reads = 0;
 static int profile_n55 = 0; /* --profile n55: bd_decode_n55 */
@@ -460,6 +461,244 @@ static int read_obd(struct diag_link *link, unsigned char pid, double *value) {
     return decoded;
 }
 
+/* --metrics: the N55 tiles chosen in BoostDeck (n55_metrics.h). Each distinct DID is read once per
+ * due time, two per request where the DME allows it, and every value goes out as an NBN1 frame. */
+typedef struct {
+    int wanted[NM_MAX_FRAME];
+    unsigned count, nsources;
+    nm_source source[NM_MAX_SOURCES];
+    uint64_t due[NM_MAX_SOURCES], skip_until[NM_MAX_SOURCES];
+    double value[NM_MAX_FRAME], aux[NM_MAX_FRAME];
+    uint64_t observed[NM_MAX_FRAME];
+    int valid[NM_MAX_FRAME];
+    double ambient, open_mm, closed_mm;
+    uint64_t ambient_time, stops_time;
+    int have_ambient, have_stops, paired;
+    nm_tracker tracker;
+} metrics_run;
+
+static int parse_metrics(const char *list, metrics_run *r) {
+    const char *p = list;
+    memset(r, 0, sizeof *r);
+    while (*p) {
+        const char *end = strchr(p, ',');
+        const size_t n = end ? (size_t)(end - p) : strlen(p);
+        const int id = nm_find(p, n);
+        unsigned i;
+        if (id < 0 || r->count == NM_MAX_FRAME) return 0;
+        for (i = 0; i < r->count; ++i) if (r->wanted[i] == id) return 0;
+        r->wanted[r->count++] = id;
+        if (!end) break;
+        p = end + 1;
+    }
+    if (!r->count) return 0;
+    r->nsources = nm_sources(r->wanted, r->count, r->source);
+    r->paired = 1;
+    nm_tracker_init(&r->tracker);
+    return 1;
+}
+
+static void trace_payload(unsigned did, int obd, const unsigned char *p, unsigned n, unsigned pair_with) {
+    unsigned i;
+    if (!trace_reads) return;
+    fprintf(stderr, "RAW mono_ms=%llu ecu=12 %s=%0*X payload=", (unsigned long long)bd_mono_ms(),
+            obd ? "pid" : "did", obd ? 2 : 4, did);
+    for (i = 0; i < n; ++i) fprintf(stderr, "%02X", p[i]);
+    if (pair_with) fprintf(stderr, " pair=%04X", pair_with);
+    fputc('\n', stderr);
+}
+
+/* A value for source k: update every wanted metric it feeds. */
+static void metrics_take(metrics_run *r, unsigned k, const unsigned char *p, unsigned n) {
+    const nm_source *s = &r->source[k];
+    const uint64_t now = bd_mono_ms();
+    unsigned i;
+    if (!(s->flags & NF_OBD)) {
+        if (s->did == NM_AMBIENT_DID) {
+            r->have_ambient = nm_decode_ambient(p, n, &r->ambient);
+            if (r->have_ambient) r->ambient_time = now;
+            return;
+        }
+        if (s->did == NM_WG_OPEN_DID || s->did == NM_WG_CLOSED_DID) {
+            double mm;
+            if (nm_decode_stop(p, n, &mm)) {
+                if (s->did == NM_WG_OPEN_DID) r->open_mm = mm; else r->closed_mm = mm;
+                r->have_stops |= s->did == NM_WG_OPEN_DID ? 1 : 2;
+                r->stops_time = now;
+            }
+            return;
+        }
+    }
+    for (i = 0; i < r->count; ++i) {
+        const unsigned id = (unsigned)r->wanted[i];
+        const nm_metric *m = &nm_metrics[id];
+        double x;
+        if (m->did != s->did || (m->flags & NF_OBD) != (s->flags & NF_OBD)) continue;
+        if (!nm_decode(id, p, n, &x)) continue;
+        if (m->flags & NF_AMBIENT) {
+            if (!r->have_ambient || now - r->ambient_time > 1800 || !nm_gauge(id, x, r->ambient, &x)) continue;
+        }
+        if ((m->flags & NF_WASTEGATE) &&
+            (r->have_stops != 3 || !nm_wastegate_pct(x, r->open_mm, r->closed_mm, &x))) continue;
+        r->value[i] = x;
+        r->aux[i] = nm_track(&r->tracker, id, x);
+        r->observed[i] = now;
+        r->valid[i] = 1;
+    }
+}
+
+/* One source alone: 1 read, 0 refused or empty, -1 link lost, -3 request failed (link kept). */
+static int metrics_single(struct diag_link *link, metrics_run *r, unsigned k) {
+    const nm_source *s = &r->source[k];
+    unsigned char request[3], prefix[3], reply[96];
+    unsigned negative, size, head;
+    int n;
+    if (s->flags & NF_OBD) {
+        request[0] = 0x01; request[1] = (unsigned char)s->did;
+        size = 2; head = 2;
+    } else {
+        request[0] = 0x22; request[1] = (unsigned char)(s->did >> 8); request[2] = (unsigned char)s->did;
+        size = 3; head = 3;
+    }
+    memcpy(prefix, request, size);
+    prefix[0] = (unsigned char)(request[0] + 0x40);
+    n = diag_link_request(link, 0x12, request, size, prefix, size, reply,
+                          diag_link_on_most(link) ? 64 : sizeof reply, 500, &negative);
+    if (n == -2) {
+        fprintf(stderr, "ECU 12 %s %04X NRC %02X\n", s->flags & NF_OBD ? "PID" : "DID", s->did, negative);
+        return 0;
+    }
+    if (n == -3) return -3;
+    if (n < 0) return -1;
+    if (n <= (int)head) return 0;
+    trace_payload(s->did, s->flags & NF_OBD, reply + head, (unsigned)n - head, 0);
+    metrics_take(r, k, reply + head, (unsigned)n - head);
+    return 1;
+}
+
+static int pairable(const nm_source *s) { return !(s->flags & NF_OBD) && (s->size == 1 || s->size == 2); }
+
+/* Sources a and b in one request. Return codes as metrics_single; -2 when the DME refused the request. */
+static int metrics_pair(struct diag_link *link, metrics_run *r, unsigned a, unsigned b) {
+    unsigned char reply[32];
+    const unsigned char *pa, *pb;
+    const nm_source *sa = &r->source[a], *sb = &r->source[b];
+    int rc = read_did_pair(link, 0x12, sa->did, sa->size, sb->did, sb->size, reply, sizeof reply, &pa, &pb);
+    if (rc != 1) return rc;
+    trace_payload(sa->did, 0, pa, sa->size, sb->did);
+    trace_payload(sb->did, 0, pb, sb->size, sa->did);
+    metrics_take(r, a, pa, sa->size);
+    metrics_take(r, b, pb, sb->size);
+    return 1;
+}
+
+static int metrics_send(int sock, struct sockaddr_in *dest, metrics_run *r, uint32_t seq) {
+    char packet[NM_MAX_PACKET];
+    nm_frame f;
+    const uint64_t now = bd_mono_ms();
+    unsigned i;
+    int len;
+    memset(&f, 0, sizeof f);
+    f.seq = seq;
+    f.sent_ms = now;
+    for (i = 0; i < r->count; ++i) {
+        uint64_t age;
+        if (!r->valid[i]) continue;
+        age = now - r->observed[i];
+        if (age >= nm_stale_ms((unsigned)r->wanted[i])) { r->valid[i] = 0; continue; }
+        f.entry[f.count].id = (unsigned)r->wanted[i];
+        f.entry[f.count].value = r->value[i];
+        f.entry[f.count].aux = r->aux[i];
+        f.entry[f.count].age_ms = (unsigned)age;
+        ++f.count;
+    }
+    len = nm_encode(&f, packet, sizeof packet);
+    return len > 0 && sendto(sock, packet, (size_t)len, 0, (struct sockaddr *)dest, sizeof *dest) == len;
+}
+
+static void metrics_demo(metrics_run *r, unsigned count, unsigned tick_ms) {
+    const double t = count * (tick_ms / 1000.0);
+    unsigned i;
+    for (i = 0; i < r->count; ++i) {
+        const nm_metric *m = &nm_metrics[r->wanted[i]];
+        double x = m->lo + (m->hi - m->lo) * (.5 + .4 * sin(t + i));
+        if (m->rule == NR_KNOCK) x = fmod(t, 6) < .2 ? 1 : 0;
+        if (m->rule == NR_MISFIRE) x = 0;
+        r->value[i] = x;
+        r->aux[i] = nm_track(&r->tracker, (unsigned)r->wanted[i], x);
+        r->observed[i] = bd_mono_ms();
+        r->valid[i] = 1;
+    }
+}
+
+static int run_metrics(struct diag_link *link, int sock, struct sockaddr_in *dest, metrics_run *r,
+                       unsigned cycles, int demo, int session, pid_t parent, unsigned tick_ms,
+                       unsigned minimum_idle_ms) {
+    unsigned count = 0, i;
+    uint32_t seq = 0;
+    int most_lost = 0;
+    while (diag_running && (!cycles || count < cycles) && (!session || getppid() == parent)) {
+        const uint64_t start = bd_mono_ms();
+        if (demo) metrics_demo(r, count, tick_ms);
+        else {
+            unsigned due[NM_MAX_SOURCES], ndue = 0;
+            int up;
+            diag_link_tick(link);
+            up = diag_link_up(link);
+            for (i = 0; up && i < r->nsources; ++i) {
+                if (start < r->skip_until[i] || start < r->due[i]) continue;
+                due[ndue++] = i;
+                r->due[i] = r->source[i].rate_ms ? start + r->source[i].rate_ms : 0;
+            }
+            for (i = 0; i < ndue && diag_running; ) {
+                const unsigned a = due[i];
+                int rc;
+                unsigned used = 1;
+                if (r->paired && i + 1 < ndue && pairable(&r->source[a]) && pairable(&r->source[due[i + 1]])) {
+                    const unsigned b = due[i + 1];
+                    used = 2;
+                    rc = metrics_pair(link, r, a, b);
+                    if (rc == -2 || rc == 0) {
+                        /* Refused or unexpected: each on its own. Both answering alone means the DME
+                         * refuses pairs; one refusing means only that DID is unavailable. */
+                        int ra = metrics_single(link, r, a), rb = ra < 0 ? ra : metrics_single(link, r, b);
+                        if (ra == 1 && rb == 1) r->paired = 0;
+                        if (ra == 0) r->skip_until[a] = bd_mono_ms() + 30000;
+                        if (rb == 0) r->skip_until[b] = bd_mono_ms() + 30000;
+                        rc = ra < 0 ? ra : rb < 0 ? rb : 1;
+                    }
+                } else {
+                    rc = metrics_single(link, r, a);
+                    if (rc == 0) r->skip_until[a] = bd_mono_ms() + 30000;
+                }
+                if (rc == -3) {            /* skip this source for a while; values still fresh stay */
+                    r->skip_until[a] = bd_mono_ms() + 2000;
+                    break;
+                }
+                if (rc < 0) {
+                    diag_link_drop(link);
+                    if (diag_link_lost(link)) { most_lost = 1; diag_running = 0; }
+                    else if (!session) { memset(r->valid, 0, sizeof r->valid); r->have_ambient = 0; }
+                    break;
+                }
+                /* A tunnel read is slow, so each new value goes out at once. */
+                if (diag_link_on_most(link) && !metrics_send(sock, dest, r, ++seq)) diag_running = 0;
+                i += used;
+            }
+            if (up && link->fd >= 0) (void)diag_link_should_yield(link, bd_mono_ms());
+        }
+        if (!metrics_send(sock, dest, r, ++seq)) { perror("send frame"); diag_running = 0; }
+        ++count;
+        {
+            const uint64_t elapsed = bd_mono_ms() - start;
+            unsigned idle_ms = elapsed < tick_ms ? (unsigned)(tick_ms - elapsed) : 0;
+            if (!demo && idle_ms < minimum_idle_ms) idle_ms = minimum_idle_ms;
+            if (idle_ms) pause_ms((int)idle_ms);
+        }
+    }
+    return most_lost ? 1 : 0;
+}
+
 static int send_frame(int sock, struct sockaddr_in *dest, bd_frame *f, uint64_t *observed) {
     char packet[BD_MAX_PACKET];
     uint64_t now = bd_mono_ms();
@@ -478,6 +717,8 @@ int main(int argc, char **argv) {
     const char *host = 0;
     unsigned port = 6801, udp_port = BD_UDP_PORT, cycles = 0, count = 0, i;
     int demo = 0, sock, no_trans = 0, n55 = 0, session = 0, scanned = 0, transport = DIAG_AUTO, most_lost = 0;
+    const char *metrics = 0;
+    static metrics_run run;
     struct diag_link link;
     struct diag_link_cfg cfg;
     pid_t parent = getppid();
@@ -525,6 +766,7 @@ int main(int argc, char **argv) {
                  (!strcmp(argv[i+1], "n55") || !strcmp(argv[i+1], "reference"))) {
             n55 = profile_n55 = paired = !strcmp(argv[++i], "n55");
         }
+        else if (!strcmp(argv[i], "--metrics") && i+1 < (unsigned)argc && !metrics) metrics = argv[++i];
         else if (!strcmp(argv[i], "--host") && i+1 < (unsigned)argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < (unsigned)argc) port = number(argv[++i],1,65535);
         else if (!strcmp(argv[i], "--udp-port") && i+1 < (unsigned)argc) udp_port = number(argv[++i],1,65535);
@@ -532,7 +774,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "auto")) ++i;
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "hsfz")) { transport = DIAG_HSFZ; ++i; }
         else if (!strcmp(argv[i], "--transport") && i+1 < (unsigned)argc && !strcmp(argv[i+1], "most")) { transport = DIAG_MOST; ++i; }
-        else { fprintf(stderr, "Usage: %s (--host IPv4 | --demo) [--transport auto|hsfz|most] [--port 6801] [--udp-port 42860] [--cycles N] [--no-trans] [--profile reference|n55] [--trace] [--session]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "Usage: %s (--host IPv4 | --demo) [--transport auto|hsfz|most] [--port 6801] [--udp-port 42860] [--cycles N] [--no-trans] [--profile reference|n55] [--metrics key,...] [--trace] [--session]\n", argv[0]); return 2; }
     }
     if (host && demo) { fprintf(stderr, "Choose --host or --demo, never both.\n"); return 2; }
     if (!host && !demo && transport == DIAG_HSFZ) { fprintf(stderr, "--transport hsfz needs --host.\n"); return 2; }
@@ -548,6 +790,17 @@ int main(int argc, char **argv) {
     if (sock < 0) { perror("UDP socket"); return 1; }
     memset(&dest,0,sizeof dest); dest.sin_family=AF_INET; dest.sin_port=htons((uint16_t)udp_port);
     inet_pton(AF_INET,"127.0.0.1",&dest.sin_addr); /* local process IPC only */
+    if (metrics) {
+        int rc;
+        if (!parse_metrics(metrics, &run)) { fprintf(stderr, "--metrics: unknown, repeated or too many keys\n"); close(sock); return 2; }
+        profile_n55 = 1;
+        fprintf(stderr, "%s: F87 M2 N55 tiles, %u values from %u reads\n",
+                demo ? "DEMO / NO VEHICLE CONNECTION" : host ? "READ ONLY / HSFZ" : "READ ONLY / MOST", run.count, run.nsources);
+        rc = run_metrics(&link, sock, &dest, &run, cycles, demo, session, parent, tick_ms, minimum_idle_ms);
+        diag_link_close(&link);
+        close(sock);
+        return rc;
+    }
     memset(&f,0,sizeof f); f.demo=(unsigned)demo;
     fprintf(stderr, "%s: %s candidate profile; validate against ISTA/logger.\n",
         demo ? "DEMO / NO VEHICLE CONNECTION" : host ? "READ ONLY / HSFZ" : "READ ONLY / MOST",

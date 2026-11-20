@@ -1,9 +1,9 @@
 CC ?= cc
 PYTHON ?= python3
 CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Werror
-CORE = src/gauge_core.c
+CORE = src/gauge_core.c src/n55_metrics.c
 CORE_LINK = $(CORE) src/diag_link.c
-HEADERS = src/gauge_core.h src/drive_frame.h src/diagnostic_lease.h src/diag_link.h
+HEADERS = src/gauge_core.h src/n55_metrics.h src/drive_frame.h src/diagnostic_lease.h src/diag_link.h
 # Every host worker carries the HSFZ-then-MOST link, with a fake DSI selected by ID6_FAKE_MOST.
 MOST = src/most/most_link.c src/most/dsi_client.c src/most/most_proto.c src/most/dsi_bind.c
 MOST_HEADERS = src/most/most_link.h src/most/dsi_client.h src/most/most_proto.h src/most/dsi_abi.h

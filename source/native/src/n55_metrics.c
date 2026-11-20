@@ -240,17 +240,21 @@ unsigned nm_sources(const int *wanted, unsigned count, nm_source out[NM_MAX_SOUR
     unsigned i, n = 0;
     int ambient = 0, wastegate = 0;
     for (i = 0; i < count; ++i) {
-        const nm_metric *m;
         if (wanted[i] < 0 || wanted[i] >= NM_COUNT) continue;
-        m = &nm_metrics[wanted[i]];
-        n = add_source(out, n, m->did, m->offset ? 0 : m->size, m->flags & NF_OBD, m->rate_ms);
-        if (m->flags & NF_AMBIENT) ambient = 1;
-        if (m->flags & NF_WASTEGATE) wastegate = 1;
+        if (nm_metrics[wanted[i]].flags & NF_AMBIENT) ambient = 1;
+        if (nm_metrics[wanted[i]].flags & NF_WASTEGATE) wastegate = 1;
     }
+    /* Helpers first, so the values that need them decode in the same scan. */
     if (ambient) n = add_source(out, n, NM_AMBIENT_DID, 2, 0, NM_AMBIENT_MS);
     if (wastegate) {
         n = add_source(out, n, NM_WG_OPEN_DID, 2, NF_SIGNED, NM_STOPS_MS);
         n = add_source(out, n, NM_WG_CLOSED_DID, 2, NF_SIGNED, NM_STOPS_MS);
+    }
+    for (i = 0; i < count; ++i) {
+        const nm_metric *m;
+        if (wanted[i] < 0 || wanted[i] >= NM_COUNT) continue;
+        m = &nm_metrics[wanted[i]];
+        n = add_source(out, n, m->did, m->offset ? 0 : m->size, m->flags & NF_OBD, m->rate_ms);
     }
     return n;
 }

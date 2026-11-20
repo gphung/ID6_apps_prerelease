@@ -2,6 +2,7 @@
 // Network diagnostics run in the separate collector process, never in HmiMain3D.
 #include "plugin_factory.h"
 #include "gauge_core.h"
+#include "n55_metrics.h"
 #include "dial_scales.h"
 #include "diagnostic_worker.h"
 #include "diagnostic_gateway.h"
@@ -40,6 +41,17 @@ const char kUnitsFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/units.txt";
 const char kUnitsTemp[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/units.tmp";
 // N55 layout (tools/make_n55_layout.py) OPTIONS actions.
 const unsigned kCelsiusAction = 70u, kFahrenheitAction = 71u, kPsiAction = 72u, kBarAction = 73u;
+// N55 tiles (tools/make_n55_layout.py --tiles, tools/n55_table.py): eight keys, "-" for blank.
+const char kTilesFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/tiles.txt";
+const char kTilesTemp[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/tiles.tmp";
+const unsigned kCaptionModel = 120u, kButtonModel = 130u, kHeaderModel = 140u, kTilesHeaderModel = 148u;
+const unsigned kResetAction = 170u, kPickFirst = 1000u, kPickBlank = 63u;
+// Images (tools/make_n55_tiles_art.py): captions, and bars that start at the zero mark.
+const unsigned kTilesBackground = 56302u;
+const unsigned kCaptionFirst = 57000u, kCaptionBlank = 57063u;
+const unsigned kZeroFirst = 58000u, kZeroSet = 600u;
+const unsigned kRed = 7u;   // kColorNames
+typedef char tile_steps_check[kDialSteps == NM_STEPS ? 1 : -1];
 #endif
 
 // profile.txt holding "n55" selects the F87 M2 N55 reads (SIGNALS.md). Anything else keeps the reference.
@@ -52,22 +64,14 @@ bool n55Profile() {
     return n55;
 }
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
-// N55: the transmission slot shows engine oil temperature as "Oil temp" on a 100-300 F bar, and
-// the tall Active Ethanol tile becomes the ENGINE warm-up panel: the same temperature as a
-// thermometer and the band name. Both bars take the band colour (bd_oil_band).
-// Palettes index kColorNames.
+// N55: the eight tiles show the metrics chosen in OPTIONS > Tiles (n55_metrics.h), and the tall
+// Active Ethanol tile is the ENGINE warm-up panel: engine oil temperature as a 100-300 F
+// thermometer and the band name, in the band colour (bd_oil_band). The OIL TEMP tile takes the
+// band colour too. Palettes index kColorNames.
+#ifdef PERF_LAB
 const double kOilMinimumC = (100.0 - 32) / 1.8, kOilMaximumC = (300.0 - 32) / 1.8;
-// N55 bar ranges where the reference ranges leave the bar mostly empty: boost to 25 psi
-// (bm3 maps peak about 20-22 psi), rail to 200 bar (system maximum), gauge oil pressure to 6 bar.
-const struct { unsigned slot; double minimum, maximum; } kN55Ranges[] = {
-    {BD_BOOST, 0, 25}, {BD_RAIL, 0, 200}, {BD_OIL, 0, 6},
-};
 const unsigned kOilPalette[] = {1u /* Blue */, 0u /* BMW Orange */, 2u /* Green */, 7u /* Red */};
-#ifdef PERF_LAB
 const char* const kOilBandNames[] = {"Cold", "Warm", "Ready", "Hot"};
-#endif
-#ifdef PERF_LAB
-const unsigned kN55Background = 56301u; // tools/make_n55_background.py: OIL TEMP and ENGINE
 #endif
 #ifdef PERF_LAB
 typedef char dial_count_check[kBarCount + 1 == BD_COUNT ? 1 : -1];
@@ -95,11 +99,24 @@ class BoostDeck : public bmw::PluginApp {
     bool bar_;          // N55: pressure tiles in bar
     void loadUnits();
     void saveUnits() const;
-    bool metricFor(unsigned slot) const {
-        if (!n55_) return metric_;
-        if (slot==BD_IAT || slot==BD_TRANS || slot==BD_COOLANT) return celsius_;
-        if (slot==BD_BOOST || slot==BD_RAIL || slot==BD_OIL) return bar_;
-        return false;
+    // N55 tiles: the metric at each position, and the latest value of each metric.
+    struct Live { double value, aux; uint64_t sampled; bool valid; };
+    int tiles_[NM_TILES];
+    Live live_[NM_COUNT];
+    double knock_count_;
+    uint64_t knock_at_, discharge_since_;
+    unsigned captions_[NM_TILES];
+    bool bar_shown_[NM_TILES];
+    char metric_list_[NM_MAX_FRAME*16];
+    void loadTiles();
+    void saveTiles() const;
+    void assignTile(unsigned position, int metric);
+    void refreshTileMenus();
+    void refreshTiles(uint64_t now);
+    void takeFrame(const nm_frame& frame);
+    bool fresh(unsigned id, uint64_t now) const {
+        const Live& l = live_[id];
+        return l.valid && now >= l.sampled && now - l.sampled < nm_stale_ms(id);
     }
 #endif
     uint64_t retry_at_;
@@ -147,6 +164,15 @@ public:
         refresh();
         return true;
     }
+    template <unsigned Position, int Metric> bool pick(const bmw::Parcel&) {
+        assignTile(Position, Metric);
+        return true;
+    }
+    bool resetTiles(const bmw::Parcel&) {
+        memcpy(tiles_, nm_default_tiles, sizeof tiles_);
+        assignTile(0, tiles_[0]);
+        return true;
+    }
 #endif
     void reapCollector() {
         if (collector_ <= 0) return;
@@ -172,6 +198,11 @@ public:
         memset(&frame_,0,sizeof frame_); memset(labels_,0,sizeof labels_);
         memset(images_,0,sizeof images_);
         received_=0;
+#ifdef PERF_LAB
+        memset(live_,0,sizeof live_);
+        knock_count_=0; knock_at_=0; discharge_since_=0;
+        memset(captions_,0,sizeof captions_);
+#endif
     }
     void refresh();
     void poll();
@@ -183,8 +214,13 @@ bool BoostDeck::onInit() {
     n55_=n55Profile();
     oil_band_=-1;
 #ifdef PERF_LAB
-    // The N55 profile has no Active Ethanol (an MHD+ MG1 read); its tile is the ENGINE panel.
-    if (n55_) updateModel(69u,bmw::ImageID(kN55Background));
+    // The N55 profile has no Active Ethanol (an MHD+ MG1 read); its tile is the ENGINE panel, and
+    // the tile captions are images over a background without them.
+    if (n55_) {
+        updateModel(69u,bmw::ImageID(kTilesBackground));
+        loadTiles();
+        for (unsigned p=0;p<NM_TILES;++p) bar_shown_[p]=true;
+    }
 #endif
     struct sockaddr_in a;
     fd_=socket(AF_INET,SOCK_DGRAM,0);
@@ -234,6 +270,30 @@ bool BoostDeck::onInit() {
         addHandler(kPsiAction,action);
         action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changePressure<true> >;
         addHandler(kBarAction,action);
+#define BD_PICK(p, m) &Action::execImpl<BoostDeck,&BoostDeck::pick<p,m> >
+#define BD_PICK10(p, b) BD_PICK(p,b), BD_PICK(p,b+1), BD_PICK(p,b+2), BD_PICK(p,b+3), BD_PICK(p,b+4), \
+                        BD_PICK(p,b+5), BD_PICK(p,b+6), BD_PICK(p,b+7), BD_PICK(p,b+8), BD_PICK(p,b+9)
+#define BD_PICK_ROW(p) {BD_PICK10(p,0), BD_PICK10(p,10), BD_PICK10(p,20), BD_PICK10(p,30), BD_PICK(p,40), \
+                        BD_PICK(p,NM_BLANK)}
+        // One action per position and metric (and blank): a picked metric needs no second step.
+        static const Handler pickHandlers[NM_TILES][NM_COUNT+1] = {
+            BD_PICK_ROW(0), BD_PICK_ROW(1), BD_PICK_ROW(2), BD_PICK_ROW(3),
+            BD_PICK_ROW(4), BD_PICK_ROW(5), BD_PICK_ROW(6), BD_PICK_ROW(7)
+        };
+#undef BD_PICK_ROW
+#undef BD_PICK10
+#undef BD_PICK
+        typedef char pick_count[NM_COUNT == 41 && NM_TILES == 8 ? 1 : -1];
+        (void)sizeof(pick_count);
+        for (unsigned p=0;p<NM_TILES;++p) {
+            for (unsigned m=0;m<=NM_COUNT;++m) {
+                action.m_exec=pickHandlers[p][m];
+                addHandler(kPickFirst+p*64u+(m<NM_COUNT ? m : kPickBlank),action);
+            }
+        }
+        action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::resetTiles>;
+        addHandler(kResetAction,action);
+        refreshTileMenus();
     }
 #endif
     selectColor(color_);
@@ -258,6 +318,9 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
         stopCollector();
         received_=0;
         memset(&frame_,0,sizeof frame_);
+#ifdef PERF_LAB
+        memset(live_,0,sizeof live_);
+#endif
         refresh();
     }
     return true;
@@ -285,6 +348,124 @@ void BoostDeck::saveUnits() const {
     if (fclose(file)==0 && written) rename(kUnitsTemp,kUnitsFile);
     else remove(kUnitsTemp);
 }
+
+// A missing or damaged tiles.txt gives the default layout (nm_parse_tiles).
+void BoostDeck::loadTiles() {
+    char text[512];
+    size_t n=0;
+    FILE* file=fopen(kTilesFile,"r");
+    if (file) {
+        n=fread(text,1,sizeof text,file);
+        fclose(file);
+    }
+    nm_parse_tiles(text,n<sizeof text ? n : 0,tiles_);
+}
+
+void BoostDeck::saveTiles() const {
+    char text[512];
+    const int n=nm_format_tiles(tiles_,text,sizeof text);
+    FILE* file=n>0 ? fopen(kTilesTemp,"w") : 0;
+    if (!file) return;
+    const bool written=fwrite(text,1,static_cast<size_t>(n),file)==static_cast<size_t>(n);
+    if (fclose(file)==0 && written) rename(kTilesTemp,kTilesFile);
+    else remove(kTilesTemp);
+}
+
+void BoostDeck::assignTile(unsigned position, int metric) {
+    nm_assign(tiles_,position,metric);
+    saveTiles();
+    refreshTileMenus();
+    // The collector reads only what the tiles show: start it again with the new list.
+    stopCollector();
+    retry_at_=0;
+    memset(live_,0,sizeof live_);
+    refresh();
+}
+
+void BoostDeck::refreshTileMenus() {
+    updateModel(kTilesHeaderModel,bmw::BasicString<char>("Choose a tile to change"));
+    for (unsigned p=0;p<NM_TILES;++p) {
+        char name[32], header[64];
+        if (tiles_[p]>=0) nm_display_name(static_cast<unsigned>(tiles_[p]),name,sizeof name);
+        else strcpy(name,"(blank)");
+        snprintf(header,sizeof header,"Showing: %s",name);
+        updateModel(kButtonModel+p,bmw::BasicString<char>(name));
+        updateModel(kHeaderModel+p,bmw::BasicString<char>(header));
+    }
+}
+
+void BoostDeck::takeFrame(const nm_frame& frame) {
+    for (unsigned i=0;i<NM_COUNT;++i) live_[i].valid=false;
+    for (unsigned i=0;i<frame.count;++i) {
+        const nm_entry& e=frame.entry[i];
+        if (e.id>=NM_COUNT || e.age_ms>frame.sent_ms) continue;
+        Live& l=live_[e.id];
+        l.value=e.value; l.aux=e.aux; l.sampled=frame.sent_ms-e.age_ms; l.valid=true;
+        if (e.id==NM_KNOCK) {
+            if (e.aux>knock_count_) knock_at_=l.sampled;   // a new knock event
+            knock_count_=e.aux;                            // a new collector counts from 0
+        }
+    }
+    received_=frame.sent_ms;
+}
+
+void BoostDeck::refreshTiles(uint64_t now) {
+    const bool running=fresh(NM_RPM,now) && live_[NM_RPM].value>400;
+    for (unsigned p=0;p<NM_TILES;++p) {
+        const int m=tiles_[p];
+        char label[64]="";
+        unsigned image=kBarFirst;
+        const unsigned caption=m>=0 ? kCaptionFirst+static_cast<unsigned>(m) : kCaptionBlank;
+        if (caption!=captions_[p]) {
+            updateModel(kCaptionModel+p,bmw::ImageID(caption));
+            captions_[p]=caption;
+        }
+        if ((m>=0)!=bar_shown_[p]) {
+            bar_shown_[p]=m>=0;
+            setProperty(200u+p,3u,bmw::Parcel(bar_shown_[p]));
+        }
+        if (m>=0) {
+            const unsigned id=static_cast<unsigned>(m);
+            const nm_metric& d=nm_metrics[id];
+            const Live& l=live_[id];
+            unsigned palette=color_==kMulticolor ? kMulticolor+p : color_;
+            const bool ok=fresh(id,now);
+            unsigned step=0;
+            if (ok) {
+                nm_format_value(id,l.value,l.aux,celsius_,bar_,label,sizeof label);
+                step=nm_bar_step(id,l.value,kDialSteps);
+                switch (d.rule) {
+                case NR_OIL_BAND: if (oil_band_>=0) palette=kOilPalette[oil_band_]; break;
+                case NR_KNOCK:
+                    // Full red on a knock, empty 1 s later; the text stays live.
+                    step=static_cast<unsigned>(nm_knock_fraction(knock_at_ && now>=knock_at_ ? now-knock_at_
+                                                                 : static_cast<uint64_t>(NM_KNOCK_FADE_MS))*kDialSteps+.5);
+                    palette=kRed;
+                    break;
+                case NR_MISFIRE: if (l.value>0) palette=kRed; break;
+                case NR_BATTERY_V: if (nm_battery_v_red(l.value,running)) palette=kRed; break;
+                case NR_BATTERY_A: if (nm_battery_a_red(l.value,running,now,&discharge_since_)) palette=kRed; break;
+                case NR_BATTERY_PCT: if (nm_battery_pct_red(l.value)) palette=kRed; break;
+                case NR_START_MARGIN: if (nm_start_margin_red(l.value)) palette=kRed; break;
+                default: break;
+                }
+            } else strcpy(label,"--");
+            if (d.bar==NB_ZERO) {
+                const int set=nm_zero_set(id);
+                if (!ok) step=nm_zero_step(id,kDialSteps);   // the empty track and its zero mark
+                image=kZeroFirst+static_cast<unsigned>(set)*kZeroSet+palette*(kDialSteps+1)+step;
+            } else if (step) image=kBarFirst+palette*kDialSteps+step;
+        }
+        if (image!=images_[p]) {
+            updateModel(60u+p,bmw::ImageID(image));
+            images_[p]=image;
+        }
+        if (strcmp(label,labels_[p])) {
+            updateModel(50u+p,bmw::BasicString<char>(label));
+            strcpy(labels_[p],label);
+        }
+    }
+}
 #endif
 
 void BoostDeck::startVisibleCollector() {
@@ -296,9 +477,24 @@ void BoostDeck::startVisibleCollector() {
     const char *args[8];
     unsigned k=0;
     args[k++]=kCollector; args[k++]="--host"; args[k++]=gateway.host(); args[k++]="--session";
-    if (n55) { args[k++]="--profile"; args[k++]="n55"; }
 #ifdef PERF_LAB
+    if (n55) {
+        // Each tile's metric once, oil temperature for ENGINE, and RPM for the battery warnings.
+        int wanted[NM_MAX_FRAME];
+        const unsigned count=nm_wanted(tiles_,wanted);
+        size_t used=0;
+        metric_list_[0]=0;
+        for (unsigned i=0;i<count;++i) {
+            const int n=snprintf(metric_list_+used,sizeof metric_list_-used,"%s%s",i ? "," : "",
+                                 nm_metrics[wanted[i]].key);
+            if (n<0 || static_cast<size_t>(n)>=sizeof metric_list_-used) return;
+            used+=static_cast<size_t>(n);
+        }
+        args[k++]="--metrics"; args[k++]=metric_list_;
+    }
     else args[k++]="--ethanol";
+#else
+    if (n55) { args[k++]="--profile"; args[k++]="n55"; }
 #endif
     args[k]=0;
     collector_=launch(args,-1);
@@ -336,11 +532,20 @@ bool BoostDeck::invokeDataUpdate(unsigned key, const bmw::Parcel& data) {
 void BoostDeck::poll() {
     reapCollector();
     startVisibleCollector();
-    // A bounded non-blocking drain: at most 8 * 512 bytes per UI tick.
-    char data[BD_MAX_PACKET];
+    // A bounded non-blocking drain: at most 8 packets per UI tick.
+    char data[static_cast<unsigned>(NM_MAX_PACKET) > static_cast<unsigned>(BD_MAX_PACKET) ? static_cast<unsigned>(NM_MAX_PACKET) : static_cast<unsigned>(BD_MAX_PACKET)];
     for (unsigned n=0;fd_>=0 && n<8;++n) {
         ssize_t k=recv(fd_,data,sizeof data,0);
         if (k<=0) break;
+#ifdef PERF_LAB
+        if (n55_) {
+            nm_frame frame;
+            if (gauges_visible_ && !stopping_ && nm_parse(data,static_cast<size_t>(k),&frame) &&
+                frame.sent_ms && frame.sent_ms<=bd_mono_ms() && (!received_ || frame.sent_ms>=received_))
+                takeFrame(frame);
+            continue;
+        }
+#endif
         bd_frame next;
         if (gauges_visible_ && !stopping_ && bd_parse(data,static_cast<size_t>(k),&next) &&
             next.sent_ms && next.sent_ms<=bd_mono_ms() &&
@@ -353,23 +558,27 @@ void BoostDeck::poll() {
 
 void BoostDeck::refresh() {
     uint64_t elapsed=received_ ? bd_mono_ms()-received_ : static_cast<uint64_t>(BD_STALE_MS);
+#ifdef PERF_LAB
+    if (n55_) {
+        const uint64_t now=bd_mono_ms();
+        if (fresh(NM_OIL_TEMP,now)) oil_band_=bd_oil_band(live_[NM_OIL_TEMP].value,oil_band_);
+        else oil_band_=-1;
+        refreshTiles(now);
+    }
+    for (unsigned i=0;!n55_ && i<kBarCount;++i) {
+#else
     for (unsigned i=0;i<kBarCount;++i) {
+#endif
         char label[128];
-        DialScale scale = kDialScales[i];
-        const bool oil = n55_ && i==BD_TRANS;
-        for (unsigned r=0;n55_ && r<sizeof kN55Ranges/sizeof kN55Ranges[0];++r) {
-            if (kN55Ranges[r].slot==i) { scale.minimum=kN55Ranges[r].minimum; scale.maximum=kN55Ranges[r].maximum; }
-        }
-        if (oil) { scale.minimum=kOilMinimumC; scale.maximum=kOilMaximumC; scale.name="Oil temp"; }
+        const DialScale scale = kDialScales[i];
         unsigned image = kBarFirst;
         if (received_ && bd_is_fresh(&frame_,i,elapsed)) {
             double x=frame_.value[i];
-            if (oil) oil_band_=bd_oil_band(x,oil_band_);
             const char *unit_space = *scale.unit ? " " : "";
             double reading = bd_display_value(i,x,0);
             if (i==BD_BOOST && fabs(reading)<0.05) reading=0;
 #ifdef PERF_LAB
-            if (metricFor(i)) {
+            if (metric_) {
                 const char* units=i==BD_AFR ? "" : i==BD_TIMING ? "deg" :
                     i==BD_IAT || i==BD_TRANS || i==BD_COOLANT ? "\260C" : "bar";
                 snprintf(label,sizeof label,"%.1f%s%s",bd_display_value(i,x,1),*units ? " " : "",units);
@@ -385,13 +594,8 @@ void BoostDeck::refresh() {
             if (fraction<0) fraction=0;
             if (fraction>1) fraction=1;
             unsigned step=static_cast<unsigned>(fraction*kDialSteps+.5);
-            if (step) {
-                const unsigned palette = oil && oil_band_>=0 ? kOilPalette[oil_band_]
-                                       : color_ == kMulticolor ? kMulticolor + i : color_;
-                image += palette*kDialSteps+step;
-            }
+            if (step) image += (color_ == kMulticolor ? kMulticolor + i : color_)*kDialSteps+step;
         } else {
-            if (oil) oil_band_=-1;
 #ifdef PERF_LAB
             strcpy(label,"--");
 #else
@@ -412,9 +616,9 @@ void BoostDeck::refresh() {
     unsigned ethanolImage=kEthanolFirst;
     if (n55_) {
         // ENGINE panel: oil thermometer in the band colour, and the band name.
-        const bool valid = received_ && bd_is_fresh(&frame_,BD_TRANS,elapsed) && oil_band_>=0;
+        const bool valid = oil_band_>=0;
         if (valid) {
-            double fraction=(frame_.value[BD_TRANS]-kOilMinimumC)/(kOilMaximumC-kOilMinimumC);
+            double fraction=(live_[NM_OIL_TEMP].value-kOilMinimumC)/(kOilMaximumC-kOilMinimumC);
             if (fraction<0) fraction=0;
             if (fraction>1) fraction=1;
             const unsigned step=static_cast<unsigned>(fraction*kEthanolSteps+.5);

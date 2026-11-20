@@ -103,6 +103,11 @@ void nm_format_value(unsigned id, double value, double aux, int celsius, int bar
 /* Bar step 0..steps. For NB_ZERO bars also the zero mark's step. */
 unsigned nm_bar_step(unsigned id, double value, unsigned steps);
 unsigned nm_zero_step(unsigned id, unsigned steps);
+/* NB_ZERO bars come in one image set per distinct zero step (ascending, at NM_STEPS): its index, or -1. */
+enum { NM_STEPS = 32 };
+int nm_zero_set(unsigned id);
+/* Menu text: BOOST TARGET -> Boost Target, HPFP TARGET -> HPFP Target (tools/n55_table.py). */
+void nm_display_name(unsigned id, char *out, size_t size);
 
 /* Knock bar: full when a knock was just seen, empty NM_KNOCK_FADE_MS later. */
 enum { NM_KNOCK_FADE_MS = 1000, NM_DISCHARGE_MS = 15000 };

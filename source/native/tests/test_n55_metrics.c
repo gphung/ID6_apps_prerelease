@@ -179,6 +179,17 @@ static void test_text_and_bars(void) {
     assert(nm_zero_step(NM_BATTERY_AMPS, 32) == 12);
     assert(nm_bar_step(NM_TIMING, -30, 32) == 0 && nm_bar_step(NM_TIMING, 40, 32) == 32);
     assert(nm_bar_step(NM_THROTTLE, 50, 32) == 16);
+    /* Image sets in ascending zero step, as tools/n55_table.py zero_sets(): 11, 12, 16. */
+    assert(nm_zero_set(NM_TIMING) == 0 && nm_zero_set(NM_TIMING6) == 0);
+    assert(nm_zero_set(NM_BATTERY_AMPS) == 1 && nm_zero_set(NM_FUEL_TRIM) == 2 && nm_zero_set(NM_BOOST) == -1);
+    nm_display_name(NM_HPFP_TARGET, s, sizeof s);
+    assert(!strcmp(s, "HPFP Target"));
+    nm_display_name(NM_BATTERY_PCT, s, sizeof s);
+    assert(!strcmp(s, "Battery %"));
+    nm_display_name(NM_TIMING3, s, sizeof s);
+    assert(!strcmp(s, "Timing 3"));
+    nm_display_name(NM_AFR_TARGET, s, 4);
+    assert(!strcmp(s, "AFR"));
 }
 
 static void test_rules(void) {

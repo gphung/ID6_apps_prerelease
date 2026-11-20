@@ -34,6 +34,31 @@ Coolant `4300` is one byte × 0.75 − 48 °C on this DME (`4B` = 8.25 °C, agai
 
 BoostDeck captions the N55 transmission slot **OIL TEMP** and turns the tall Active Ethanol tile into an **ENGINE** warm-up panel (background `56301`, from `native/tools/make_n55_background.py`). Both bars span 100–300 °F and take the band colour rather than the selected gauge colour: Cold (blue) below 180 °F, Warm (BMW Orange) from 180 °F, Ready (green) from 194 °F, and Hot (red) from 266 °F. Each band is held until the reading falls 1 °C below its threshold. The ENGINE panel shows the band name under the thermometer, and a strip beside it marks the bands.
 
+### Configurable tiles
+
+With the tiles layout (`native/tools/make_n55_layout.py --tiles`, artwork from `native/tools/make_n55_tiles_art.py`), the eight tiles show any of the 41 metrics in `native/src/n55_metrics.c`, chosen in **OPTIONS > Tiles** and saved in `BoostDeck/tiles.txt` (eight keys, `-` for a blank tile; a damaged file gives the default layout). The plugin starts the collector with `--metrics` and the keys it needs: each tile's metric, oil temperature for the ENGINE panel, and RPM when a battery tile needs to know whether the engine runs. The collector reads each DID once per due time, however many tiles show it (Timing and Timing 1 are both `4A49`), two per request. A DID the DME refuses is skipped for 30 s without ending pairing.
+
+Values read on the car on 2026-11-19 at warm idle, then with the engine off and loads on:
+
+| Metric | DID and scaling | Reading |
+| --- | --- | --- |
+| Timing 1–6 | `4A49`, `4A4E`, `4A4C`, `4A4F`, `4A4A`, `4A4D`, signed × 0.1 ° | −6.8, −6.4, −7.6, −5.7, −6.9, −5.4 ° |
+| Throttle (pedal) | `480B` × 0.0015259 % | 0 % |
+| Knock | `4A36`, 0/1 | 0 |
+| Boost target | `4AB0` × 0.0390625 hPa, minus ambient | ambient at idle |
+| HPFP / HPFP target | `58EF` / `5837` × 0.005 bar | 76.9 / 76.6 bar |
+| LPFP | `58F3` × 0.1 kPa | 6.8 bar, engine off and at idle |
+| Wastegate | `4654` mm between the learned stops `576A` (open) and `576B` (closed) | 3.6 % open |
+| Battery | `5853` (IBS) × 0.001 V | 15.03–15.14 V charging, 12.49 V engine off at 10 A |
+| Battery amps | `5852` × 0.02 − 200 A; the IBS reports charging as negative, so the tile negates it | +20.6 A after the start |
+| Battery % | `4023` byte 17 (charge state today) | 58 % |
+| Start margin | `460E` × 0.004 − 100 %: charge minus the start-capability limit | 24.7 % |
+| Exhaust temp | `5896` × 0.0234375 − 273.15 °C, the DME's model after the main catalyst | 242 °C |
+
+The timing DIDs are the DME's firing-order array (1-5-3-6-2-4), mapped to cylinders in the same order as its per-cylinder roughness and knock entries, which name their cylinders. That mapping is an assumption. `5916` (battery charge) answers NRC `31`. Whether LPFP is absolute or gauge pressure is not yet known. The misfire counters (`4B23`–`4B32`) are taken to count a window and restart at 0; the tile's second number adds the windows for the drive.
+
+Warnings turn a tile red: Knock for 1 s after each knock, fading (the text stays live, with the count since BoostDeck opened); a misfire count above 0; Battery below 12.0 V, or above 15.5 V while the engine runs; Battery amps after 15 s of more than 10 A discharge with the engine running; Battery % below 40 %; Start margin below 5 %. Timing, Fuel trim and Battery amps bars start at a zero mark.
+
 ## Engine Fault Codes on the F87 M2 N55
 
 `EngineCodes/profile.txt` holding `n55` selects `native/src/dme_descriptions_n55.h`: all 1,378 fault-memory codes of SGBD `mevd172y` (MEVD17.2 / 17.2.6 / 17.2.G, SGBD index `0xF1910`) from bmw-unified-db 11.004, translated from BMW's German location texts. `native/tools/make_dme_descriptions.py` extracts the German text to a private CSV and writes the table from the translated CSV, so the BMW-derived German text is not committed. The 254 codes that the reference 340i table shares with this DME have identical German texts in both SGBDs.

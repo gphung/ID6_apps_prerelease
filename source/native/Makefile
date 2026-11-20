@@ -46,7 +46,7 @@ build/test-most: tests/test_most.c $(MOST) $(FAKE_DSI) $(MOST_HEADERS) | build
 build/test-diag-link: tests/test_diag_link.c $(CORE_LINK) $(MOST) tests/fake_most_env.c $(FAKE_DSI) $(HEADERS) $(MOST_HEADERS) | build
 	$(HOST_LINK) $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway build/test-fault-text build/test-n55-metrics
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-codes build/test-core build/test-most build/test-diag-link build/bootmod3 build/exhaust-flap build/test-dme-lookup build/test-diagnostic-gateway build/test-fault-text build/test-n55-metrics build/n55-dump
 	./build/test-core
 	./build/test-n55-metrics
 	./build/test-dme-lookup
@@ -57,6 +57,7 @@ test: build/boostdeck-collector build/shift-deck build/mhd-maps build/engine-cod
 	$(PYTHON) -B tests/test_drive_apps.py
 	$(PYTHON) -B tests/test_oneshot_most.py
 	$(PYTHON) -B tests/test_transport.py
+	$(PYTHON) -B tests/test_n55_tiles.py
 
 build/test-dme-lookup: tests/test_dme_lookup.c src/dme_lookup.h src/dme_descriptions.h src/dme_descriptions_n55.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_dme_lookup.c -o $@
@@ -68,4 +69,7 @@ build/test-fault-text: tests/test_fault_text.c src/fault_text.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_fault_text.c -o $@
 
 build/test-n55-metrics: tests/test_n55_metrics.c src/n55_metrics.c src/n55_metrics.h | build
+	$(CC) $(CFLAGS) -Isrc $(filter %.c,$^) -lm -o $@
+
+build/n55-dump: tests/n55_dump.c src/n55_metrics.c src/n55_metrics.h | build
 	$(CC) $(CFLAGS) -Isrc $(filter %.c,$^) -lm -o $@

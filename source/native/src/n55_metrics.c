@@ -411,6 +411,48 @@ unsigned nm_bar_step(unsigned id, double value, unsigned steps) {
 
 unsigned nm_zero_step(unsigned id, unsigned steps) { return nm_bar_step(id, 0, steps); }
 
+int nm_zero_set(unsigned id) {
+    unsigned steps[NM_COUNT], n = 0, i, j, mine;
+    if (id >= NM_COUNT || nm_metrics[id].bar != NB_ZERO) return -1;
+    mine = nm_zero_step(id, NM_STEPS);
+    for (i = 0; i < NM_COUNT; ++i) {
+        unsigned z;
+        int known = 0;
+        if (nm_metrics[i].bar != NB_ZERO) continue;
+        z = nm_zero_step(i, NM_STEPS);
+        for (j = 0; j < n; ++j) if (steps[j] == z) known = 1;
+        if (!known) steps[n++] = z;
+    }
+    for (i = 0, j = 0; i < n; ++i) if (steps[i] < mine) ++j;
+    return (int)j;
+}
+
+void nm_display_name(unsigned id, char *out, size_t size) {
+    static const char *const acronyms[] = {"AFR", "HPFP", "LPFP", "RPM"};
+    const char *p;
+    size_t used = 0;
+    if (!out || !size) return;
+    out[0] = 0;
+    if (id >= NM_COUNT) return;
+    p = nm_metrics[id].caption;
+    while (*p && used + 1 < size) {
+        const char *end = strchr(p, ' ');
+        const size_t n = end ? (size_t)(end - p) : strlen(p);
+        size_t k, a;
+        int keep = 0;
+        for (a = 0; a < sizeof acronyms / sizeof acronyms[0]; ++a)
+            if (strlen(acronyms[a]) == n && !memcmp(acronyms[a], p, n)) keep = 1;
+        for (k = 0; k < n && used + 1 < size; ++k) {
+            const char ch = p[k];
+            out[used++] = keep || k == 0 || ch < 'A' || ch > 'Z' ? ch : (char)(ch - 'A' + 'a');
+        }
+        if (!end) break;
+        if (used + 1 < size) out[used++] = ' ';
+        p = end + 1;
+    }
+    out[used] = 0;
+}
+
 double nm_knock_fraction(uint64_t since_ms) {
     return since_ms >= NM_KNOCK_FADE_MS ? 0 : 1 - (double)since_ms / NM_KNOCK_FADE_MS;
 }

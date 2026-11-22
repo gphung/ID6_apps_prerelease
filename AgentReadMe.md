@@ -1,5 +1,7 @@
 # AgentReadMe
 
+For the F87 M2 N55 work in this fork (status, owner rules, open items, catching up with upstream), read [M2-N55-HANDOFF.md](M2-N55-HANDOFF.md) first.
+
 ## Select the apps
 
 Ask the owner for their choice of **MHD+ Suite** or **Bootmod3 Suite**, and whether they want **xDrive Control (experimental)** and **HUD Gauges**. Install only the selected tuning menu. Install xDrive Control (experimental) only when selected. BoostDeck, ShiftDeck, and Engine Fault Codes are independent apps.
